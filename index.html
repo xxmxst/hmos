@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'none'; object-src 'none'; frame-src 'none'"
+    />
+    <title>鸿蒙投屏助手</title>
+  </head>
+  <body>
+    <div id="app" data-window-mode="full">
+      <header class="app-header">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">
+            <span></span>
+          </div>
+          <div>
+            <h1>鸿蒙投屏助手</h1>
+            <p>USB · HarmonyOS 5+ / Android</p>
+          </div>
+        </div>
+        <div class="connection">
+          <label class="sr-only" for="device-select">设备</label>
+          <select id="device-select" title="选择设备">
+            <option value="">正在查找设备…</option>
+          </select>
+          <button id="refresh-devices" class="icon-button" title="刷新设备" aria-label="刷新设备">↻</button>
+          <label class="sr-only" for="profile-select">画质</label>
+          <select id="profile-select" title="画质档位">
+            <option value="quality">清晰 · 30 fps</option>
+            <option value="balanced" selected>均衡 · 60 fps</option>
+            <option value="smooth">流畅 · 30 fps</option>
+          </select>
+          <button id="configure-android" class="icon-button" title="选择 scrcpy.exe">配置 Android</button>
+          <button id="connect-button" class="primary-button">开始投屏</button>
+        </div>
+      </header>
+
+      <main>
+        <aside class="control-rail" aria-label="手机控制">
+          <div class="rail-scroll">
+          <button data-phone-control data-key="Back" title="返回（Esc）"><span>←</span><small>返回</small></button>
+          <button data-phone-control data-key="Home" title="主页（Ctrl+Shift+H）"><span>⌂</span><small>主页</small></button>
+          <div class="rail-divider"></div>
+          <button data-phone-control data-key="VolumeUp" title="增大音量"><span>＋</span><small>音量</small></button>
+          <button data-phone-control data-key="VolumeDown" title="减小音量"><span>−</span><small>音量</small></button>
+          <button data-phone-control data-key="Power" title="电源键"><span>⏻</span><small>电源</small></button>
+          <button data-phone-control id="screen-power-button" title="关闭手机物理屏幕，电脑继续投屏和控制（Android/ADB）" aria-pressed="false"><span>☾</span><small>灭屏</small></button>
+          <div class="rail-divider"></div>
+          <button data-phone-control id="rotate-button" title="旋转屏幕（Ctrl+Shift+R）"><span>↻</span><small>旋转</small></button>
+          <button data-phone-control id="paste-button" title="粘贴电脑剪贴板（Ctrl+V）"><span>⌘</span><small>粘贴</small></button>
+          <button data-phone-control id="copy-screenshot-button" title="复制手机截图到电脑剪贴板"><span>▣</span><small>复制截图</small></button>
+          <button data-phone-control id="screenshot-button" title="保存手机截图为 PNG 文件"><span>▣</span><small>保存截图</small></button>
+          <button data-phone-control id="record-button" title="录制投屏画面（自动保存到系统视频目录，WebM，不录声音）" aria-pressed="false"><span>●</span><small>录屏</small></button>
+          <button data-phone-control id="ocr-button" title="冻结画面并识别文字"><span>文</span><small>识字</small></button>
+          </div>
+          <div class="rail-footer">
+            <button id="compact-connect-button" class="compact-only" title="检测设备并开始投屏"><span>▶</span><small>连接</small></button>
+            <button id="window-mode-toggle" title="切换极简模式" aria-label="切换极简模式"><span>⤡</span><small>极简</small></button>
+          </div>
+        </aside>
+
+        <section class="stage" id="stage">
+          <div class="screen-shell" id="screen-shell">
+            <textarea id="keyboard-input" class="keyboard-input" tabindex="-1" aria-label="手机键盘输入" autocomplete="off" autocapitalize="off" spellcheck="false" disabled></textarea>
+            <canvas id="screen-canvas" tabindex="0" aria-label="手机投屏画面" hidden></canvas>
+            <video id="fallback-video" muted autoplay playsinline tabindex="0" aria-label="手机投屏兼容画面" hidden></video>
+            <video id="standby-video" muted autoplay playsinline tabindex="0" aria-label="手机投屏切换画面" hidden></video>
+            <div id="screen-transition" class="screen-transition" role="status" aria-live="polite" hidden>
+              正在适配屏幕…
+            </div>
+            <div id="empty-state" class="empty-state">
+              <div class="phone-illustration" aria-hidden="true">
+                <div class="phone-glow"></div>
+                <div class="phone-body">
+                  <div class="phone-speaker"></div>
+                  <div class="phone-wave wave-one"></div>
+                  <div class="phone-wave wave-two"></div>
+                  <div class="phone-dot"></div>
+                </div>
+              </div>
+              <h2 id="empty-title">连接鸿蒙或 Android 手机</h2>
+              <p id="empty-message">开启开发者模式与 USB 调试，然后用数据线连接电脑。</p>
+              <div id="compact-connection" class="compact-connection compact-only" role="group" aria-label="设备连接" aria-busy="false"></div>
+              <button id="expand-connect" class="primary-button compact-only" title="展开完整模式，调整设备与投屏设置">完整设置</button>
+              <div id="diagnostic-chips" class="diagnostic-chips"></div>
+            </div>
+            <div id="loading-state" class="loading-state" hidden>
+              <div class="spinner"></div>
+              <span>正在建立低延迟视频通道…</span>
+            </div>
+            <div id="ocr-overlay" class="ocr-overlay" hidden>
+              <div id="ocr-surface" class="ocr-surface">
+                <img id="ocr-snapshot" alt="用于文字识别的冻结手机画面" draggable="false" />
+                <div id="ocr-text-layer" class="ocr-text-layer" aria-label="可选择的识别文字"></div>
+                <div id="ocr-progress" class="ocr-progress" role="status" aria-live="polite">
+                  <div class="spinner"></div>
+                  <strong id="ocr-progress-status">正在截取手机画面…</strong>
+                  <div class="ocr-progress-track"><i id="ocr-progress-bar"></i></div>
+                </div>
+              </div>
+              <div class="ocr-toolbar">
+                <span id="ocr-summary">正在准备识别…</span>
+                <button id="ocr-copy-selected" disabled>复制选中</button>
+                <button id="ocr-copy-all" disabled>复制全部</button>
+                <button id="ocr-retry">重新识别</button>
+                <button id="ocr-exit">退出识字</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <aside class="info-panel">
+          <div class="panel-section">
+            <h2>连接状态</h2>
+            <div class="status-card">
+              <span id="status-dot" class="status-dot"></span>
+              <div>
+                <strong id="status-title">未连接</strong>
+                <p id="status-message">等待选择设备</p>
+              </div>
+            </div>
+          </div>
+          <div class="panel-section">
+            <h2>实时信息</h2>
+            <dl class="metrics">
+              <div><dt>手机屏幕</dt><dd id="metric-device-resolution">—</dd></div>
+              <div><dt>视频帧</dt><dd id="metric-video-resolution">—</dd></div>
+              <div><dt>帧率</dt><dd id="metric-fps">—</dd></div>
+              <div><dt>码率</dt><dd id="metric-bitrate">—</dd></div>
+              <div><dt>解码器</dt><dd id="metric-decoder">待机</dd></div>
+              <div><dt>视频数据</dt><dd id="metric-video-packets">—</dd></div>
+              <div><dt>H.264</dt><dd id="metric-h264">—</dd></div>
+            </dl>
+          </div>
+          <div class="panel-section tips">
+            <h2>快捷操作</h2>
+            <p><kbd>左键拖动</kbd><span>点击与滑动</span></p>
+            <p><kbd>滚轮</kbd><span>上下滚动</span></p>
+            <p><kbd>右键 / Esc</kbd><span>返回</span></p>
+            <p><kbd>键盘输入</kbd><span>先点击手机输入框</span></p>
+            <p><kbd>Ctrl + V</kbd><span>粘贴文本</span></p>
+            <p><kbd>识字 / Esc</kbd><span>选择文字 / 退出</span></p>
+          </div>
+        </aside>
+      </main>
+
+      <footer class="app-footer">
+        <span id="footer-state">准备就绪</span>
+        <span class="privacy-note">截图与录屏按需保存到本机，画面、输入和 OCR 不会上传</span>
+      </footer>
+      <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    </div>
+    <script type="module" src="/src/renderer/main.ts"></script>
+  </body>
+</html>

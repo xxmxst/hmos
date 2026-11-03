@@ -1,0 +1,131 @@
+{
+  "name": "hm-remote",
+  "version": "0.1.0",
+  "private": true,
+  "description": "通过 USB 投屏并控制鸿蒙和 Android 设备的 Windows 桌面工具",
+  "main": "dist/main/main.cjs",
+  "type": "module",
+  "scripts": {
+    "vendor:sdk": "node scripts/fetch-sdk.mjs",
+    "build:bridge": "node scripts/build-bridge.mjs",
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "start": "npm run build && electron .",
+    "dist": "npm run vendor:sdk && npm run vendor:jre && npm run build && electron-builder --win nsis portable",
+    "vendor:jre": "node scripts/build-jre.mjs",
+    "smoke:bridge": "node scripts/smoke-bridge.mjs",
+    "smoke:ocr": "node scripts/smoke-ocr.mjs",
+    "smoke:android": "node scripts/smoke-android.cjs"
+  },
+  "dependencies": {
+    "@tesseract.js-data/chi_sim": "^1.0.0",
+    "@tesseract.js-data/eng": "^1.0.0",
+    "buffer": "6.0.3",
+    "events": "3.3.0",
+    "jmuxer": "2.1.0",
+    "process": "0.11.10",
+    "stream-browserify": "3.0.0",
+    "tesseract.js": "^7.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.10.5",
+    "electron": "40.10.2",
+    "electron-builder": "26.0.12",
+    "esbuild": "0.24.2",
+    "typescript": "5.7.3",
+    "vite": "6.0.7",
+    "vitest": "2.1.8"
+  },
+  "build": {
+    "appId": "cn.hmremote.desktop",
+    "productName": "鸿蒙投屏助手",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json",
+      "node_modules/jmuxer/**/*",
+      "node_modules/tesseract.js/**/*",
+      "node_modules/tesseract.js-core/**/*",
+      "node_modules/bmp-js/**/*",
+      "node_modules/idb-keyval/**/*",
+      "node_modules/is-url/**/*",
+      "node_modules/node-fetch/**/*",
+      "node_modules/regenerator-runtime/**/*",
+      "node_modules/tr46/**/*",
+      "node_modules/wasm-feature-detect/**/*",
+      "node_modules/webidl-conversions/**/*",
+      "node_modules/whatwg-url/**/*",
+      "node_modules/zlibjs/**/*"
+    ],
+    "asarUnpack": [
+      "node_modules/tesseract.js/**/*",
+      "node_modules/tesseract.js-core/**/*",
+      "node_modules/bmp-js/**/*",
+      "node_modules/idb-keyval/**/*",
+      "node_modules/is-url/**/*",
+      "node_modules/node-fetch/**/*",
+      "node_modules/regenerator-runtime/**/*",
+      "node_modules/tr46/**/*",
+      "node_modules/wasm-feature-detect/**/*",
+      "node_modules/webidl-conversions/**/*",
+      "node_modules/whatwg-url/**/*",
+      "node_modules/zlibjs/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "vendor/scrcpy",
+        "to": "scrcpy",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "bridge/build/hmremote-bridge.jar",
+        "to": "bridge/hmremote-bridge.jar"
+      },
+      {
+        "from": "vendor/sdk/hosScrcpy-1.0.15-beta.jar",
+        "to": "sdk/hosScrcpy-1.0.15-beta.jar"
+      },
+      {
+        "from": "vendor/hdc",
+        "to": "hdc",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "vendor/jre",
+        "to": "jre",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "dist/ocr/tessdata",
+        "to": "ocr/tessdata",
+        "filter": [
+          "*.traineddata.gz"
+        ]
+      }
+    ],
+    "win": {
+      "signAndEditExecutable": false,
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "artifactName": "${productName}-Portable-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "artifactName": "${productName}-Setup-${version}-${arch}.${ext}"
+    }
+  },
+  "author": "HmRemote contributors"
+}

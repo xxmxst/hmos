@@ -1,0 +1,12 @@
+node_modules/
+dist/
+release*/
+coverage/
+bridge/build/
+vendor/
+*.log
+.electron-cache/
+.tmp/
+pic/
+.agents/
+.hvigor/
