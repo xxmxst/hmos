@@ -25,6 +25,7 @@ import { ScreenRecorder } from "./screenRecorder";
 import { KeyboardInput } from "./keyboardInput";
 import { WindowControls } from "./windowControls";
 import { CompactConnection } from "./compactConnection";
+import { ApkDropInstaller } from "./apkDropInstaller";
 import {
   flattenOcrSymbols,
   nearestOcrSymbolIndex,
@@ -84,6 +85,10 @@ const elements = {
   ocrExit: required<HTMLButtonElement>("ocr-exit"),
   chips: required<HTMLDivElement>("diagnostic-chips"),
   footer: required<HTMLElement>("footer-state"),
+  apkDropHint: required<HTMLDivElement>("apk-drop-hint"),
+  apkInstallStatus: required<HTMLDivElement>("apk-install-status"),
+  apkInstallFile: required<HTMLElement>("apk-install-file"),
+  apkInstallTarget: required<HTMLElement>("apk-install-target"),
   toast: required<HTMLDivElement>("toast")
 };
 
@@ -150,7 +155,8 @@ const pipeline = new VideoPipeline(
   },
   () => window.hmRemote.requestIdr(),
   (diagnostics) => window.hmRemote.reportVideoDiagnostics(diagnostics),
-  () => window.hmRemote.captureScreenPlaceholder(elements.device.value)
+  () => window.hmRemote.captureScreenPlaceholder(elements.device.value),
+  () => !document.hidden && !ocrActive
 );
 let screenshotBusy = false;
 let screenshotTarget: "clipboard" | "file" | null = null;
@@ -161,9 +167,31 @@ const keyboard = new KeyboardInput(elements.keyboardInput,
   () => connected && !ocrActive && !switching,
   (command) => window.hmRemote.control(command),
   () => window.hmRemote.pasteClipboard(), showToast);
+const apkInstaller = new ApkDropInstaller({
+  surface: window,
+  target: () => devices.find((device) => deviceKey(device) === elements.device.value),
+  isConnecting: () => connecting,
+  install: (key, file) => window.hmRemote.installApk(key, file),
+  beforeInstall: () => { releaseScreenControls(); keyboard.suspend(); },
+  changed: (state) => {
+    elements.apkDropHint.hidden = !state.dragging || state.busy;
+    const target = devices.find((device) => deviceKey(device) === elements.device.value);
+    const ready = target?.backend === "adb" && target.state === "ready" && target.transport === "USB";
+    elements.apkDropHint.querySelector("strong")!.textContent = connecting ? "请等待设备连接完成"
+      : ready ? "松开以安装 APK" : "请先选择 Android 设备";
+    elements.apkDropHint.querySelector("span")!.textContent = ready
+      ? `目标：${target.label}。一次拖入一个 APK，覆盖安装并保留已有应用数据。`
+      : "连接并选择一台已授权的 Android / ADB USB 设备后，即可拖入单个 APK 安装。";
+    elements.apkInstallStatus.hidden = !state.busy;
+    elements.apkInstallFile.textContent = state.fileName;
+    elements.apkInstallTarget.textContent = state.targetLabel;
+    updateConnectionButtons();
+  },
+  notify: showToast
+});
 const deviceConnection = new CompactConnection({
   listDevices: () => window.hmRemote.listDevices(),
-  isBusy: () => connecting || sessionActive,
+  isBusy: () => connecting || sessionActive || apkInstaller.busy,
   devicesChanged: renderDevices,
   connect: async (device) => { elements.device.value = deviceKey(device); await toggleConnection(); },
   scanningChanged: updateConnectionButtons,
@@ -180,12 +208,18 @@ new WindowControls(() => {
   releaseScreenControls();
   keyboard.suspend();
   requestAnimationFrame(() => { syncVideoSurface(); syncOcrSurface(); });
-  if (!sessionActive && !connecting) renderDevices(devices);
+  if (!sessionActive && !connecting && !apkInstaller.busy) renderDevices(devices);
   deviceConnection.setEnabled(isCompactMode());
 }, showToast);
 window.hmRemote.onStopRecording(() => void recorder.stop());
 void pipeline.initialize();
 
+window.hmRemote.onVideoRecovery((request) => {
+  releaseScreenControls();
+  keyboard.suspend();
+  pipeline.prepareRecovery(request);
+  window.hmRemote.videoRecoveryReady(request.sessionId);
+});
 window.hmRemote.onStatus(updateStatus);
 window.hmRemote.onOcrProgress(updateOcrProgress);
 window.addEventListener("message", (event) => {
@@ -225,7 +259,7 @@ elements.configureAndroid.addEventListener("click", async () => {
       showToast("Android 投屏工具已配置");
     }
   } catch (error) { showToast(errorMessage(error)); }
-  finally { elements.configureAndroid.disabled = sessionActive; }
+  finally { updateConnectionButtons(); }
 });
 elements.connect.addEventListener("click", () => void toggleConnection());
 elements.device.addEventListener("change", updateConnectionButtons);
@@ -234,7 +268,7 @@ elements.compactConnect.addEventListener("click", () => {
     void refreshDevices();
   } else void toggleConnection();
 });
-window.addEventListener("beforeunload", () => deviceConnection.dispose());
+window.addEventListener("beforeunload", () => { deviceConnection.dispose(); apkInstaller.dispose(); });
 elements.paste.addEventListener("click", () => void pasteClipboard());
 elements.rotate.addEventListener("click", () => void rotate());
 elements.screenPower.addEventListener("click", () => void toggleScreenPower());
@@ -443,9 +477,13 @@ function renderDevices(found: DeviceInfo[]): void {
 
 function updateConnectionButtons(): void {
   const selected = devices.some((device) => deviceKey(device) === elements.device.value && device.state === "ready");
-  elements.refresh.disabled = sessionActive || connecting || deviceConnection.scanning;
-  elements.connect.disabled = connecting || (!sessionActive && (!selected || deviceConnection.scanning));
-  elements.compactConnect.disabled = connecting || (!sessionActive && deviceConnection.scanning);
+  const installing = apkInstaller.busy;
+  elements.device.disabled = sessionActive || connecting || installing;
+  elements.profile.disabled = sessionActive || connecting || installing;
+  elements.configureAndroid.disabled = sessionActive || connecting || installing;
+  elements.refresh.disabled = sessionActive || connecting || installing || deviceConnection.scanning;
+  elements.connect.disabled = connecting || installing || (!sessionActive && (!selected || deviceConnection.scanning));
+  elements.compactConnect.disabled = connecting || installing || (!sessionActive && deviceConnection.scanning);
   const detecting = !sessionActive && !connecting && deviceConnection.scanning;
   elements.refresh.textContent = deviceConnection.scanning ? "…" : "↻";
   elements.compactConnect.title = detecting ? "正在检测设备…" : connecting ? "正在连接设备…" : sessionActive ? "断开手机投屏（录屏会自动保存）" : selected ? "开始投屏" : "检测设备并开始投屏";
@@ -456,7 +494,7 @@ function updateConnectionButtons(): void {
 }
 
 async function toggleConnection(): Promise<void> {
-  if (connecting) {
+  if (connecting || apkInstaller.busy) {
     return;
   }
   if (sessionActive) {
@@ -516,6 +554,7 @@ function updateStatus(status: MirrorStatus): void {
   const wasSwitching = switching;
   screenPowerOff = status.screenPowerOff === true;
   if (status.state === "idle" || status.state === "error" || status.state === "stopping") void recorder.stop();
+  if (status.state === "reconnecting") { releaseScreenControls(); keyboard.suspend(); }
   connected = status.state === "streaming";
   switching = status.video?.stage === "switching";
   sessionActive =
@@ -575,6 +614,7 @@ function updateStatus(status: MirrorStatus): void {
     elements.empty.hidden = false;
     resetDimensionState();
   } else if (status.state === "error") {
+    if (status.videoSessionId !== undefined) pipeline.endVideoSession();
     if (ocrActive) {
       void exitOcr();
     }

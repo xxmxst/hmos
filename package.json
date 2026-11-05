@@ -1,6 +1,6 @@
 {
   "name": "hm-remote",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "通过 USB 投屏并控制鸿蒙和 Android 设备的 Windows 桌面工具",
   "main": "dist/main/main.cjs",

@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type {
   ControlCommand,
   Diagnostics,
@@ -12,6 +12,7 @@ import type {
   ScreenPlaceholder,
   StartOptions,
   VideoDiagnostics,
+  VideoRecoveryRequest,
   WindowState
 } from "../shared/types";
 import { VIDEO_PORT_WINDOW_MESSAGE } from "../shared/videoPort";
@@ -34,6 +35,8 @@ ipcRenderer.on("video-port", async (event) => {
 });
 
 
+let controlSessionId: number | undefined;
+
 const api: HmRemoteApi = {
   getWindowState: () => ipcRenderer.invoke("window:get-state") as Promise<WindowState>,
   setWindowMode: (mode) => ipcRenderer.invoke("window:mode", mode) as Promise<WindowState>,
@@ -47,6 +50,15 @@ const api: HmRemoteApi = {
   listDevices: () => ipcRenderer.invoke("devices:list") as Promise<DeviceInfo[]>,
   getDiagnostics: () => ipcRenderer.invoke("app:diagnostics") as Promise<Diagnostics>,
   configureAndroid: () => ipcRenderer.invoke("android:configure") as Promise<boolean>,
+  installApk: async (device, file) => {
+    const path = webUtils.getPathForFile(file);
+    if (!path) throw new Error("请拖入磁盘上的 APK 文件");
+    try { await ipcRenderer.invoke("apk:install", device, path); }
+    catch (error) {
+      const message = error instanceof Error ? error.message : "APK 安装失败，请检查手机连接后重试";
+      throw new Error(message.replace(/^Error invoking remote method 'apk:install': (?:Error: )?/, ""));
+    }
+  },
   copyScreenshot: (device: string, fallback?: OcrFallbackFrame) => ipcRenderer.invoke("screen:copy", device, fallback) as Promise<void>,
   saveScreenshot: (device: string, fallback?: OcrFallbackFrame) => ipcRenderer.invoke("screen:save", device, fallback) as Promise<string | null>,
   beginRecording: () => ipcRenderer.invoke("recording:begin") as Promise<{ id: string } | null>,
@@ -60,12 +72,21 @@ const api: HmRemoteApi = {
   start: (options: StartOptions) => ipcRenderer.invoke("mirror:start", options) as Promise<void>,
   stop: () => ipcRenderer.invoke("mirror:stop") as Promise<void>,
   control: (command: ControlCommand) =>
-    ipcRenderer.invoke("mirror:control", command) as Promise<void>,
+    ipcRenderer.invoke("mirror:control", command, controlSessionId) as Promise<void>,
   requestIdr: () => ipcRenderer.send("mirror:request-idr"),
   requestVideoPort: () => ipcRenderer.send("video-port:request"),
+  onVideoRecovery: (callback) => {
+    const listener = (_event: Electron.IpcRendererEvent, request: VideoRecoveryRequest) => {
+      controlSessionId = request.sessionId;
+      callback(request);
+    };
+    ipcRenderer.on("video:recover", listener);
+    return () => ipcRenderer.removeListener("video:recover", listener);
+  },
+  videoRecoveryReady: (sessionId) => ipcRenderer.send("video:recovery-ready", sessionId),
   reportVideoDiagnostics: (diagnostics: VideoDiagnostics) =>
     ipcRenderer.send("video:diagnostics", diagnostics),
-  pasteClipboard: () => ipcRenderer.invoke("clipboard:paste") as Promise<void>,
+  pasteClipboard: () => ipcRenderer.invoke("clipboard:paste", controlSessionId) as Promise<void>,
   captureScreenPlaceholder: (serial: string) =>
     ipcRenderer.invoke("screen:capture-placeholder", serial) as Promise<ScreenPlaceholder>,
   captureOcrSnapshot: (serial: string, fallbackFrame?: OcrFallbackFrame) =>

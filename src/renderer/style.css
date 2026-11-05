@@ -960,6 +960,48 @@ kbd {
 #app[data-window-mode="compact"] .ocr-toolbar button { flex: 1 0 auto; }
 #app[data-window-mode="compact"] .loading-state { max-width: calc(100% - 16px); font-size: 11px; }
 
+.apk-drop-hint {
+  position: fixed;
+  inset: 10px;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 16px;
+  text-align: center;
+  border: 2px dashed #69b8ff;
+  border-radius: 10px;
+  background: rgba(10, 19, 32, 0.9);
+  color: #e4efff;
+  pointer-events: none;
+}
+.apk-drop-hint strong { font-size: 18px; }
+.apk-drop-hint span { font-size: 12px; line-height: 1.8; }
+.apk-install-status {
+  position: fixed;
+  top: 12px;
+  left: 70px;
+  right: 12px;
+  z-index: 90;
+  display: grid;
+  gap: 5px;
+  max-width: 410px;
+  padding: 12px;
+  border: 1px solid #2b4667;
+  border-radius: 8px;
+  background: rgba(12, 22, 36, 0.95);
+  color: #e4efff;
+  font-size: 12px;
+  pointer-events: none;
+}
+.apk-install-status strong { display: flex; align-items: center; gap: 8px; }
+.apk-install-status span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.apk-install-status small { color: #a9bad0; line-height: 1.5; }
+.apk-install-status .spinner { width: 14px; height: 14px; flex-shrink: 0; }
+.apk-drop-hint[hidden], .apk-install-status[hidden] { display: none; }
+
 @media (max-width: 940px) {
   main {
     grid-template-columns: 58px minmax(380px, 1fr);

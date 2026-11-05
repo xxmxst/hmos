@@ -177,6 +177,59 @@ describe("VideoPipeline dual MediaSource lifecycle", () => {
     expect(pipeline.canControl()).toBe(true);
   });
 
+  it("preserves the visible frame and recorder source until a recovered decoder has a first frame", async () => {
+    vi.useFakeTimers();
+    const { pipeline, primary, secondary, canvas, drawImage, onDiagnostics } = fixture();
+    await pipeline.initialize();
+    pipeline.prepareRecovery({ sessionId: 1, kind: "initial" });
+    pipeline.feed({ ...packet(), sessionId: 1 });
+    primary.emit("loadeddata");
+    pipeline.setPortReady(true);
+    const previous = pipeline.getRenderTarget();
+    pipeline.prepareRecovery({ sessionId: 2, kind: "decoder" });
+    expect(canvas.hidden).toBe(false);
+    muxerState.instances[0]!.options.onError();
+    expect(drawImage).toHaveBeenCalled();
+    expect(pipeline.getRenderTarget()).toBe(previous);
+    expect(pipeline.canControl()).toBe(false);
+    const feeds = muxerState.instances.map(m => m.feed.mock.calls.length);
+    pipeline.feed({ ...packet(), sessionId: 1 });
+    expect(muxerState.instances.map(m => m.feed.mock.calls.length)).toEqual(feeds);
+    pipeline.feed({ ...packet(), sessionId: 2 });
+    secondary.emit("loadeddata");
+    expect(pipeline.getRenderTarget()).toBe(secondary.element);
+    muxerState.instances[0]!.options.onError();
+    expect(pipeline.canControl()).toBe(true);
+    expect(canvas.hidden).toBe(true);
+    expect(pipeline.canControl()).toBe(true);
+    expect(onDiagnostics).toHaveBeenLastCalledWith(expect.objectContaining({ sessionId: 2, presentedFrames: 1, stage: "decoding" }));
+    pipeline.dispose();
+  });
+
+  it("reports heartbeat without new packets and actual presented frame progress", async () => {
+    vi.useFakeTimers();
+    const { pipeline, primary, onDiagnostics } = fixture();
+    let callback!: VideoFrameRequestCallback;
+    primary.element.requestVideoFrameCallback = vi.fn(fn => { callback = fn; return 1; });
+    primary.element.cancelVideoFrameCallback = vi.fn();
+    await pipeline.initialize();
+    pipeline.prepareRecovery({ sessionId: 10, kind: "initial" });
+    pipeline.feed({ ...packet(), sessionId: 10 });
+    primary.emit("loadeddata");
+    const first = onDiagnostics.mock.calls.length;
+    callback(0, {} as VideoFrameCallbackMetadata);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(onDiagnostics.mock.calls.length).toBeGreaterThan(first);
+    expect(onDiagnostics).toHaveBeenLastCalledWith(expect.objectContaining({ sessionId: 10, packets: 1, presentedFrames: 2 }));
+    const stale = callback;
+    pipeline.reset();
+    const count = onDiagnostics.mock.calls.length;
+    stale(0, {} as VideoFrameCallbackMetadata);
+    await vi.advanceTimersByTimeAsync(10000);
+    expect(onDiagnostics).toHaveBeenCalledTimes(count);
+    expect(primary.element.cancelVideoFrameCallback).toHaveBeenCalled();
+  });
+
   it("destroys both decoder slots for a reconnect", async () => {
     const { pipeline } = fixture();
     await pipeline.initialize();

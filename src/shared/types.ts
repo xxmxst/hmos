@@ -21,7 +21,15 @@ export type VideoStage =
   | "switching"
   | "error";
 
+export interface VideoRecoveryRequest {
+  sessionId: number;
+  kind: "initial" | "port" | "decoder" | "reconnect";
+}
+
 export interface VideoDiagnostics {
+  sessionId?: number;
+  presentedFrames?: number;
+  monitorPlayback?: boolean;
   stage: VideoStage;
   packets: number;
   bytes: number;
@@ -112,6 +120,7 @@ export interface MirrorStatus {
   bitrate?: number;
   video?: VideoDiagnostics;
   screenPowerOff?: boolean;
+  videoSessionId?: number;
 }
 
 export interface TouchCommand {
@@ -248,6 +257,7 @@ export interface HmRemoteApi {
   listDevices(): Promise<DeviceInfo[]>;
   getDiagnostics(): Promise<Diagnostics>;
   configureAndroid(): Promise<boolean>;
+  installApk(device: string, file: File): Promise<void>;
   copyScreenshot(device: string, fallback?: OcrFallbackFrame): Promise<void>;
   saveScreenshot(device: string, fallback?: OcrFallbackFrame): Promise<string | null>;
   beginRecording(): Promise<{ id: string } | null>;
@@ -259,6 +269,8 @@ export interface HmRemoteApi {
   control(command: ControlCommand): Promise<void>;
   requestIdr(): void;
   requestVideoPort(): void;
+  onVideoRecovery(callback: (request: VideoRecoveryRequest) => void): () => void;
+  videoRecoveryReady(sessionId: number): void;
   reportVideoDiagnostics(diagnostics: VideoDiagnostics): void;
   pasteClipboard(): Promise<void>;
   captureScreenPlaceholder(serial: string): Promise<ScreenPlaceholder>;

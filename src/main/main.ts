@@ -6,6 +6,7 @@ import {
   ipcMain,
   MessageChannelMain,
   nativeImage,
+  powerMonitor,
   type MessagePortMain,
   type WebContents
 } from "electron";
@@ -22,6 +23,7 @@ import type {
   ScreenPlaceholder,
   StartOptions,
   VideoDiagnostics,
+  VideoRecoveryRequest,
   VideoStage
 } from "../shared/types";
 import { isVideoPortReadyMessage } from "../shared/videoPort";
@@ -29,6 +31,7 @@ import { HdcClient, parseHdcVersion } from "./hdc";
 import { captureForDevice } from "./deviceCapture";
 import { discoverDevices } from "./deviceDiscovery";
 import { AdbClient } from "./adb";
+import { ApkInstaller } from "./apkInstaller";
 import { validateImage } from "./deviceSnapshot";
 import { RecordingFile } from "./recordingFile";
 import { createRecordingPath } from "./recordingDestination";
@@ -47,10 +50,22 @@ let videoPortReady = false;
 const paths = resolveRuntimePaths();
 const hdc = paths.hdc ? new HdcClient(paths.hdc) : null;
 const harmonyMirror = new MirrorBridge(paths);
-const androidMirror = new AdbMirror(paths);
+const androidMirror = new AdbMirror(paths, {
+  prepare: prepareAndroidVideo,
+  visible: () => !!mainWindow && mainWindow.isVisible() && !mainWindow.isMinimized()
+});
 let mirror: MirrorBridge | AdbMirror = harmonyMirror;
 let mirrorBusy = false;
 let mirrorStartTask: Promise<void> | null = null;
+const apkInstaller = new ApkInstaller(() => paths.adb ? new AdbClient(paths.adb) : null, (serial) => {
+  if (mirrorBusy) throw new Error("正在连接设备，请等待连接完成后再安装 APK");
+  if (!["idle", "error"].includes(mirror.status.state)
+    && (mirror !== androidMirror || androidMirror.serial !== serial || mirror.status.state === "stopping")) {
+    throw new Error("请将 APK 拖到当前正在投屏的 Android 设备，或先停止投屏再选择设备");
+  }
+});
+let closeAfterInstall = false;
+let quitAfterInstall = false;
 let recordingStartPending = false;
 let closeAfterRecording = false;
 const recordings = new RecordingFile();
@@ -80,6 +95,18 @@ function createWindow(): void {
   void mainWindow.loadFile(join(__dirname, "../renderer/index.html"));
   mainWindow.once("ready-to-show", () => mainWindow?.show());
   mainWindow.on("close", (event) => {
+    androidMirror.cancelAutomaticRecovery();
+    if (apkInstaller.busy) {
+      event.preventDefault();
+      if (!closeAfterInstall) {
+        closeAfterInstall = true;
+        void apkInstaller.wait().catch(() => {}).then(() => {
+          closeAfterInstall = false;
+          mainWindow?.close();
+        });
+      }
+      return;
+    }
     if (recordings.active && mainWindow && !mainWindow.webContents.isDestroyed()) {
       event.preventDefault();
       closeAfterRecording = true;
@@ -95,6 +122,41 @@ function createWindow(): void {
   });
 }
 
+let videoPreparation: {
+  sessionId: number;
+  acknowledged: boolean;
+  finish(error?: Error): void;
+} | null = null;
+
+function prepareAndroidVideo(request: VideoRecoveryRequest): Promise<void> {
+  videoPreparation?.finish(new Error("视频恢复请求已替换"));
+  const target = mainWindow?.webContents;
+  if (!target || target.isDestroyed()) return Promise.reject(new Error("投屏窗口已关闭"));
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => pending.finish(new Error("电脑端视频恢复准备超时")), 2_000);
+    const pending = {
+      sessionId: request.sessionId,
+      acknowledged: false,
+      finish(error?: Error) {
+        if (videoPreparation !== pending) return;
+        clearTimeout(timer);
+        videoPreparation = null;
+        error ? reject(error) : resolve();
+      }
+    };
+    videoPreparation = pending;
+    target.send("video:recover", request);
+    attachVideoPort(target);
+  });
+}
+
+ipcMain.on("video:recovery-ready", (event, sessionId: unknown) => {
+  const pending = videoPreparation;
+  if (mainWindow?.webContents !== event.sender || !pending || pending.sessionId !== sessionId) return;
+  pending.acknowledged = true;
+  if (videoPortReady) pending.finish();
+});
+
 function attachVideoPort(target: WebContents): void {
   const previousPort = videoPort;
   videoPort = null;
@@ -106,6 +168,7 @@ function attachVideoPort(target: WebContents): void {
   port.on("message", (event) => {
     if (videoPort === port && isVideoPortReadyMessage(event.data)) {
       videoPortReady = true;
+      if (videoPreparation?.acknowledged) videoPreparation.finish();
     }
   });
   port.on("close", () => {
@@ -130,6 +193,7 @@ for (const backend of [harmonyMirror, androidMirror]) {
     const bytes = Uint8Array.from(packet.data);
     try {
       videoPort.postMessage({
+        ...(backend === androidMirror ? { sessionId: androidMirror.videoSessionId } : {}),
         data: bytes.buffer,
         timestampUs: Number(packet.timestampUs),
         sequence: packet.sequence,
@@ -162,6 +226,11 @@ ipcMain.handle("window:action", (event, action: unknown) => {
 });
 ipcMain.on("window:video-size", (event, value: unknown) => {
   if (mainWindow?.webContents === event.sender) windowController?.reportVideoSize(value);
+});
+
+ipcMain.handle("apk:install", async (event, key: unknown, path: unknown) => {
+  requireWindowController(event.sender);
+  await apkInstaller.install(key, path);
 });
 
 ipcMain.handle("devices:list", async () => {
@@ -197,6 +266,7 @@ ipcMain.handle("app:diagnostics", async (): Promise<Diagnostics> => {
 });
 
 ipcMain.handle("android:configure", async () => {
+  if (apkInstaller.busy) throw new Error("请等待 APK 安装完成后再更换工具");
   if (mirrorBusy || !["idle", "error"].includes(mirror.status.state)) throw new Error("请先停止投屏再更换工具");
   const selection = await dialog.showOpenDialog({
     title: "选择官方完整解压目录中的 scrcpy.exe", properties: ["openFile"],
@@ -213,6 +283,7 @@ ipcMain.handle("android:configure", async () => {
 });
 
 ipcMain.handle("mirror:start", async (_event, options: StartOptions) => {
+  if (apkInstaller.busy) throw new Error("请等待 APK 安装完成后再切换设备");
   if (mirrorBusy) throw new Error("连接正在处理中，请稍候");
   mirrorBusy = true;
   try {
@@ -230,11 +301,22 @@ ipcMain.handle("mirror:start", async (_event, options: StartOptions) => {
   } finally { mirrorBusy = false; mirrorStartTask = null; }
 });
 ipcMain.handle("mirror:stop", async () => {
+  if (apkInstaller.busy) throw new Error("请等待 APK 安装完成后再断开投屏");
   await ocr.cancel();
   await mirror.stop();
 });
-ipcMain.handle("mirror:control", async (_event, command: ControlCommand) => mirror.control(command));
-ipcMain.handle("clipboard:paste", async () => {
+function requireCurrentControlSession(sessionId: unknown, command?: ControlCommand): void {
+  if (mirror !== androidMirror || sessionId === androidMirror.videoSessionId) return;
+  const release = (command?.kind === "touch" && command.phase === "up") || (command?.kind === "wheel" && command.direction === "stop");
+  if (release && mirror.status.state === "reconnecting" && sessionId === androidMirror.videoSessionId - 1) return;
+  throw new Error("旧投屏会话的输入已取消，请在恢复画面后重新操作");
+}
+ipcMain.handle("mirror:control", async (_event, command: ControlCommand, sessionId: unknown) => {
+  requireCurrentControlSession(sessionId, command);
+  await mirror.control(command);
+});
+ipcMain.handle("clipboard:paste", async (_event, sessionId: unknown) => {
+  requireCurrentControlSession(sessionId);
   const text = clipboard.readText();
   validateClipboardText(text);
   await mirror.control({ kind: "paste", text });
@@ -347,7 +429,9 @@ ipcMain.on("video:diagnostics", (event, value: unknown) => {
   if (!diagnostics) {
     return;
   }
-  if (diagnostics.stage === "error") {
+  if (mirror === androidMirror) {
+    androidMirror.updateVideoDiagnostics(diagnostics);
+  } else if (diagnostics.stage === "error") {
     void mirror.failVideo(diagnostics.error ?? "视频解码失败");
   } else {
     mirror.updateVideoDiagnostics(diagnostics);
@@ -356,6 +440,8 @@ ipcMain.on("video:diagnostics", (event, value: unknown) => {
 
 app.whenReady().then(() => {
   createWindow();
+  powerMonitor.on("suspend", () => androidMirror.suspendVideoMonitoring(true));
+  powerMonitor.on("resume", () => androidMirror.suspendVideoMonitoring(false));
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
@@ -366,7 +452,15 @@ app.whenReady().then(() => {
 let quitCleanupStarted = false;
 app.on("before-quit", (event) => {
   if (quitCleanupStarted) return;
+  androidMirror.cancelAutomaticRecovery();
   event.preventDefault();
+  if (apkInstaller.busy) {
+    if (!quitAfterInstall) {
+      quitAfterInstall = true;
+      void apkInstaller.wait().catch(() => {}).then(() => { quitAfterInstall = false; app.quit(); });
+    }
+    return;
+  }
   if (recordings.active && mainWindow) {
     closeAfterRecording = true;
     mainWindow.webContents.send("recording:stop-request");
@@ -416,7 +510,15 @@ function parseVideoDiagnostics(value: unknown): VideoDiagnostics | null {
   ) {
     return null;
   }
+  if (item.sessionId !== undefined && (!Number.isSafeInteger(item.sessionId) || item.sessionId < 1
+    || !Number.isSafeInteger(item.presentedFrames) || item.presentedFrames! < 0
+    || typeof item.monitorPlayback !== "boolean")) return null;
   return {
+    ...(item.sessionId !== undefined ? {
+      sessionId: item.sessionId,
+      presentedFrames: item.presentedFrames!,
+      monitorPlayback: item.monitorPlayback!
+    } : {}),
     stage: item.stage,
     packets: Math.max(0, item.packets),
     bytes: Math.max(0, item.bytes),

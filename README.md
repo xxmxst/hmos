@@ -2,6 +2,12 @@
 
 面向 Windows 10/11 x64 的 USB 投屏控制工具，同时保留 HarmonyOS 5.0.1（API 13）及以上的 HDC 通道，并支持 Android 设备的 ADB / scrcpy 通道。桌面端可以显示手机画面，并使用鼠标完成点击、拖动、滑动和滚动；同时提供系统按键、电脑文本粘贴到手机，以及无需安装手机应用的离线 OCR 取字。
 
+## v0.1.1 当前版本
+
+2026-11-05 更新，新增 Android 拖入 APK 安装，并修复 ADB 在线时画面卡住后无法自动恢复的问题。视频采用消息通道/解码器局部修复和最多 3 次原设备重连，恢复期间保留同一份录屏；主动断开或关闭窗口会取消重连。
+
+此版本通过 TypeScript 类型检查、187 项自动测试及构建，并完成 Android 实机故障恢复、录屏连续性、最终失败与关窗保存验证；APK 拖放安装也已完成实机验证。源码与版本说明见 [v0.1.1 Release](https://github.com/xxmxst/hmos/releases/tag/v0.1.1)。沿用公开源码归档范围，不附带含 HOScrcpy SDK 的运行包。
+
 ## v0.1.0 源码归档
 
 此版本于 2026-11-03 归档到 [xxmxst/hmos](https://github.com/xxmxst/hmos)，使用 `v0.1.0` 标签和 [GitHub Release](https://github.com/xxmxst/hmos/releases/tag/v0.1.0) 固定源码版本。
@@ -39,6 +45,18 @@
 Android 工具查找优先级：`HMR_SCRCPY_PATH`、应用中保存的工具路径、打包或开发目录的 `scrcpy` / `vendor/scrcpy`、PATH、下载目录的 scrcpy 发行版。ADB 优先使用 `HMR_ADB_PATH`，其次是所选 scrcpy 同目录的 ADB，再查找 Android SDK 环境变量与 PATH。当前解析 scrcpy 3.x / 4.x / 5.x 协议；系统升级后优先选择已验证可用的最新官方发行版，不混用客户端和服务端文件。
 
 截图、录屏仅在用户操作后保存到本机，不会上传。部分手机会在截图字节前输出 Warning，Android 通道会识别并剥离该前缀，避免保存损坏的图片。
+
+## Android 视频自动恢复
+
+ADB 仍在线但画面不更新时，程序会区分手机端断流、电脑端收包中断和解码停滞：优先重建消息通道或解码器，并对支持的 scrcpy 发送视频重置探测；仍失败时按 1、2、4 秒间隔，最多连续重连原设备 3 次，保留原画质。连续健康运行 60 秒后恢复重试额度。
+
+恢复期间显示最后一帧和“正在恢复画面”，暂停向手机发送新输入；录屏保留在同一文件中。最终失败会结束并保存录屏。主动断开或退出会取消重连，物理灭屏设置在恢复后重新应用。静止画面、OCR、最小化和系统休眠有单独的探测与缓冲处理；不支持视频重置命令的早期 scrcpy 3.x 不会仅因长时间静止而自动重连。
+
+## Android 拖入 APK 安装
+
+连接并授权 Android USB 设备，在设备列表选中目标设备后，将单个 `.apk` 文件拖到窗口即可安装；完整与极简模式均支持，投屏过程中也可使用。安装会覆盖同签名应用并保留数据，不会自动启动应用。安装期间显示状态并锁定设备选择，手机如出现 USB 安装授权，需要手动确认。
+
+暂不支持鸿蒙 HDC、多个 APK 或 `.apks` / `.xapk` 拆分包。签名冲突、版本降级等失败会提示原因，不会自动卸载原应用。关闭窗口会等待安装结束，再走原有录屏保存流程。
 
 ## OCR 使用方法
 
@@ -107,6 +125,10 @@ npm.cmd run smoke:ocr
 ```
 
 `smoke:ocr` 会禁止网络读取，加载应用打包的本地中英文字库，并执行一次完整识别调用。
+
+`node scripts/smoke-apk-install.cjs` 使用隔离设备验证真实磁盘文件拖放、preload 路径解析、安装目标绑定、重复安装拦截、模式切换和关窗等待，不会安装到手机。需要真机验证时显式设置 `HMR_TEST_APK` 为测试 APK 的完整路径；仅在恰好一台 Android USB 设备就绪时执行安装，不自动打开应用，同时验证投屏、录屏连续性和关窗保存。
+
+`node scripts/smoke-video-recovery.cjs` 会连接唯一已授权的 Android USB 实机，模拟消息通道丢包、播放停滞、视频断流和本应用 scrcpy 退出，验证原设备恢复、灭屏设置、录屏连续性与主动断开取消；不重启全局 ADB server，测试产物仅保存在 `.tmp`。
 
 窗口布局和自动连接场景可分别通过 `node scripts/smoke-window.cjs`、`node scripts/smoke-compact-connection.cjs` 在隔离设备环境中验证。连接 Android 手机后，`node scripts/smoke-screen-power.cjs` 可验证物理灭屏、实时画面、控制和退出亮屏恢复；测试会临时滑动系统通知面板并在结束时收起，手机屏幕也会恢复。
 

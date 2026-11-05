@@ -22,6 +22,22 @@ export class AdbClient {
     return parseAdbDevices(await this.run(["devices", "-l"]));
   }
 
+  async installApk(serial: string, path: string): Promise<void> {
+    validateAdbSerial(serial);
+    let output: string;
+    try {
+      const result = await execFileAsync(this.executable, ["-s", serial, "install", "-r", "-t", path], {
+        windowsHide: true, timeout: 180_000, maxBuffer: 4 * 1024 * 1024, encoding: "utf8"
+      });
+      output = `${result.stdout}\n${result.stderr}`;
+    } catch (error) {
+      throw apkInstallError(error);
+    }
+    if (!/^Success\s*$/m.test(output) || /Failure\s*\[/i.test(output)) {
+      throw apkInstallError({ stdout: output });
+    }
+  }
+
   async capturePng(serial: string): Promise<Buffer> {
     validateAdbSerial(serial);
     try {
@@ -82,6 +98,35 @@ export function extractAdbPng(output: Buffer): Buffer {
     return output.subarray(offset);
   }
   throw new Error("手机没有返回标准 PNG 截图");
+}
+
+export function apkInstallError(error: unknown): Error {
+  const failure = error as { code?: string | number; killed?: boolean; stdout?: unknown; stderr?: unknown } | null;
+  if (failure?.code === "ENOENT") return new Error("未找到 ADB，请重新配置 Android 投屏工具");
+  if (failure?.killed || failure?.code === "ETIMEDOUT") {
+    return new Error("APK 安装超时，手机可能仍在处理；请确认手机上的安装结果和授权提示后再重试");
+  }
+  const output = `${failure?.stdout ?? ""}\n${failure?.stderr ?? ""}`;
+  if (/unauthorized/i.test(output)) return new Error("手机尚未授权，请在手机上允许 USB 调试后重试");
+  if (/device offline|device .*not found|no devices|device disconnected|closed|protocol fault/i.test(output)) {
+    return new Error("安装连接已断开，请检查数据线和手机连接后重试");
+  }
+  if (/INSTALL_FAILED_UPDATE_INCOMPATIBLE|INSTALL_PARSE_FAILED_INCONSISTENT_CERTIFICATES/.test(output)) {
+    return new Error("安装失败：APK 与手机已有应用的签名不一致，请使用相同签名的安装包；未卸载原应用");
+  }
+  if (/INSTALL_FAILED_VERSION_DOWNGRADE/.test(output)) return new Error("安装失败：APK 版本低于手机已有版本，请使用更新的安装包");
+  if (/INSTALL_FAILED_INSUFFICIENT_STORAGE/.test(output)) return new Error("安装失败：手机存储空间不足，请清理空间后重试");
+  if (/INSTALL_FAILED_USER_RESTRICTED|INSTALL_CANCELED_BY_USER|INSTALL_FAILED_ABORTED/.test(output)) {
+    return new Error("手机拒绝或取消了安装，请检查手机上的 USB 安装授权和安全提示后重试");
+  }
+  if (/INSTALL_FAILED_NO_MATCHING_ABIS|INSTALL_FAILED_CPU_ABI_INCOMPATIBLE/.test(output)) return new Error("安装失败：APK 不支持这台手机的处理器架构");
+  if (/INSTALL_FAILED_OLDER_SDK/.test(output)) return new Error("安装失败：手机系统版本低于 APK 要求的最低版本");
+  if (/INSTALL_FAILED_DEPRECATED_SDK_VERSION/.test(output)) return new Error("安装失败：APK 的目标系统版本过低，请使用适配新版 Android 的安装包");
+  if (/INSTALL_FAILED_INVALID_APK|INSTALL_PARSE_FAILED|INSTALL_FAILED_MISSING_SPLIT|INSTALL_FAILED_NO_CERTIFICATES/.test(output)) {
+    return new Error("安装失败：APK 无效、签名损坏或缺少拆分安装包，请使用完整的单个 APK");
+  }
+  if (/failed to stat|cannot stat|No such file|cannot open/i.test(output)) return new Error("无法读取 APK，请确认文件仍然存在且可访问");
+  return new Error("APK 安装失败，请检查安装包与手机上的授权提示后重试");
 }
 
 function adbError(error: unknown): Error {

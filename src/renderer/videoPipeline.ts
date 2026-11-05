@@ -3,11 +3,13 @@ import type {
   OcrFallbackFrame,
   ScreenPlaceholder,
   VideoDiagnostics,
+  VideoRecoveryRequest,
   VideoStage
 } from "../shared/types";
 import { H264StreamNormalizer } from "./h264Stream";
 
 export interface VideoPacket {
+  sessionId?: number;
   data: ArrayBuffer;
   timestampUs: number;
   sequence: number;
@@ -34,6 +36,12 @@ const TRAILING_START_CODE = new Uint8Array([0, 0, 0, 1]);
 
 export class VideoPipeline {
   private readonly normalizer = new H264StreamNormalizer();
+  private videoSessionId: number | undefined;
+  private rebuilding = false;
+  private presentedFrames = 0;
+  private presentationSerial = 0;
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private cancelPresentation: (() => void) | null = null;
   private readonly slots: [DecoderSlot, DecoderSlot];
   private visibleSlot: DecoderSlot | null = null;
   private targetSlot: DecoderSlot | null = null;
@@ -63,7 +71,8 @@ export class VideoPipeline {
     private readonly onDecoder: (name: DecoderName) => void,
     private readonly requestIdr: () => void,
     private readonly onDiagnostics: (diagnostics: VideoDiagnostics) => void = () => {},
-    private readonly loadPlaceholder?: () => Promise<ScreenPlaceholder>
+    private readonly loadPlaceholder?: () => Promise<ScreenPlaceholder>,
+    private readonly monitorPlayback: () => boolean = () => typeof document === "undefined" || !document.hidden
   ) {
     this.slots = [
       this.createSlot(primaryVideo),
@@ -90,6 +99,9 @@ export class VideoPipeline {
   }
 
   beginSession(): void {
+    this.videoSessionId = undefined;
+    this.rebuilding = false;
+    this.presentedFrames = 0;
     this.active = true;
     this.visibleSlot = null;
     this.targetSlot = this.slots.find((slot) => slot.muxer) ?? null;
@@ -117,8 +129,32 @@ export class VideoPipeline {
     this.reportDiagnostics(true);
   }
 
+  prepareRecovery(request: VideoRecoveryRequest): void {
+    if (request.kind === "initial") {
+      this.beginSession();
+      this.videoSessionId = request.sessionId;
+      this.clearTimers();
+    } else {
+      this.freezeVisibleFrame();
+      this.clearTimers();
+      this.active = true;
+      this.videoSessionId = request.sessionId;
+      this.rebuilding = true;
+      this.sessionGeneration++;
+      if (this.targetSlot && this.targetSlot !== this.visibleSlot) this.destroySlot(this.targetSlot);
+      this.targetSlot = null;
+      if (request.kind === "reconnect") this.normalizer.reset(); else this.normalizer.rearm();
+    }
+    this.packets = this.bytes = this.presentedFrames = 0;
+    this.recoveryAttempted = false;
+    this.configurationChangePending = false;
+    this.switchingConfigurationVersion = 0;
+    this.heartbeatTimer = setInterval(() => this.reportDiagnostics(true), 1_000);
+    this.reportDiagnostics(true);
+  }
+
   feed(packet: VideoPacket): void {
-    if (!this.active) {
+    if (!this.active || (this.videoSessionId !== undefined && packet.sessionId !== this.videoSessionId)) {
       return;
     }
     const bytes = new Uint8Array(packet.data);
@@ -137,7 +173,15 @@ export class VideoPipeline {
       const configurationVersion = this.normalizer.state.configurationVersion;
       if (chunks.length > 0) {
         const muxerInput = joinChunksWithTrailingStartCode(chunks);
-        if (!this.visibleSlot) {
+        if (this.rebuilding) {
+          let slot = this.targetSlot;
+          if (!slot || slot === this.visibleSlot || slot.configurationVersion !== configurationVersion) {
+            slot = this.freeSlot();
+            this.targetSlot = slot;
+            this.prepareSlot(slot, configurationVersion);
+          }
+          slot.muxer?.feed({ video: muxerInput });
+        } else if (!this.visibleSlot) {
           const slot = this.ensureInitialTarget(configurationVersion);
           slot.muxer?.feed({ video: muxerInput });
         } else if (configurationVersion === this.visibleSlot.configurationVersion) {
@@ -161,6 +205,9 @@ export class VideoPipeline {
   }
 
   reset(): void {
+    this.videoSessionId = undefined;
+    this.rebuilding = false;
+    this.presentedFrames = 0;
     this.active = false;
     this.visibleSlot = null;
     this.targetSlot = null;
@@ -183,6 +230,11 @@ export class VideoPipeline {
     this.reportDiagnostics(true);
   }
 
+  endVideoSession(): void {
+    this.active = false;
+    this.clearTimers();
+  }
+
   dispose(): void {
     this.reset();
   }
@@ -195,7 +247,8 @@ export class VideoPipeline {
     return Boolean(
       this.visibleSlot
       && (
-        this.switchingConfigurationVersion !== 0
+        this.rebuilding
+        || this.switchingConfigurationVersion !== 0
         || (this.targetSlot && this.targetSlot !== this.visibleSlot)
       )
     );
@@ -303,6 +356,7 @@ export class VideoPipeline {
   }
 
   private destroySlot(slot: DecoderSlot): void {
+    slot.generation++;
     slot.removeListeners?.();
     slot.removeListeners = null;
     const muxer = slot.muxer;
@@ -390,6 +444,9 @@ export class VideoPipeline {
     slot.video.hidden = false;
     this.visibleSlot = slot;
     this.targetSlot = null;
+    this.rebuilding = false;
+    this.presentedFrames++;
+    if (this.videoSessionId !== undefined) this.trackPresentation(slot);
     this.recoveryAttempted = false;
     this.configurationChangePending = false;
     this.switchingConfigurationVersion = 0;
@@ -425,6 +482,8 @@ export class VideoPipeline {
     if (!this.active || slot.generation !== generation) {
       return;
     }
+    if (this.rebuilding && slot === this.visibleSlot) return;
+    if (this.videoSessionId !== undefined) { this.fail("电脑端视频解码停止更新"); return; }
     if (slot === this.targetSlot && this.visibleSlot) {
       this.retryTransition();
       return;
@@ -446,6 +505,7 @@ export class VideoPipeline {
     if (!this.active || slot.generation !== generation) {
       return;
     }
+    if (this.rebuilding && slot === this.visibleSlot) return;
     if (this.visibleSlot && slot === this.targetSlot) {
       this.retryTransition();
     } else {
@@ -454,6 +514,7 @@ export class VideoPipeline {
   }
 
   private startInitialRecoveryTimer(): void {
+    if (this.videoSessionId !== undefined) return;
     if (
       !this.active
       || this.visibleSlot
@@ -537,6 +598,7 @@ export class VideoPipeline {
   }
 
   private startStreamTimer(): void {
+    if (this.videoSessionId !== undefined) return;
     if (!this.active || !this.portReady || this.packets !== 0 || this.streamTimer) {
       return;
     }
@@ -621,7 +683,7 @@ export class VideoPipeline {
     }
     this.active = false;
     this.clearTimers();
-    this.hideRenderTargets();
+    if (this.videoSessionId !== undefined) this.freezeVisibleFrame(); else this.hideRenderTargets();
     this.onDiagnostics(this.buildDiagnostics("error", message));
   }
 
@@ -663,6 +725,11 @@ export class VideoPipeline {
   private buildDiagnostics(stage: VideoStage, error?: string): VideoDiagnostics {
     const state = this.normalizer.state;
     return {
+      ...(this.videoSessionId !== undefined ? {
+        sessionId: this.videoSessionId,
+        presentedFrames: this.presentedFrames,
+        monitorPlayback: this.monitorPlayback()
+      } : {}),
       stage,
       packets: this.packets,
       bytes: this.bytes,
@@ -733,9 +800,39 @@ export class VideoPipeline {
   }
 
   private clearTimers(): void {
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = null;
+    this.cancelPresentation?.();
+    this.cancelPresentation = null;
+    this.presentationSerial++;
     this.clearStreamTimer();
     this.clearInitialTimers();
     this.clearTransitionTimers();
+  }
+
+  private trackPresentation(slot: DecoderSlot): void {
+    this.cancelPresentation?.();
+    const serial = ++this.presentationSerial;
+    const video = slot.video;
+    const generation = slot.generation;
+    if (typeof video.requestVideoFrameCallback === "function") {
+      let callbackId = 0;
+      const presented = () => {
+        if (!this.active || serial !== this.presentationSerial || slot.generation !== generation || this.visibleSlot !== slot) return;
+        this.presentedFrames++;
+        callbackId = video.requestVideoFrameCallback(presented);
+      };
+      callbackId = video.requestVideoFrameCallback(presented);
+      this.cancelPresentation = () => video.cancelVideoFrameCallback(callbackId);
+    } else {
+      let previous = video.getVideoPlaybackQuality?.().totalVideoFrames ?? video.currentTime;
+      const timer = setInterval(() => {
+        const current = video.getVideoPlaybackQuality?.().totalVideoFrames ?? video.currentTime;
+        if (this.visibleSlot === slot && current !== previous && Number.isFinite(current)) this.presentedFrames++;
+        previous = current;
+      }, 500);
+      this.cancelPresentation = () => clearInterval(timer);
+    }
   }
 
   private hideRenderTargets(): void {

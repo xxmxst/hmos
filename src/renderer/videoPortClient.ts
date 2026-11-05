@@ -62,7 +62,9 @@ export function parseVideoPacket(value: unknown): VideoPacket | null {
   ) {
     return null;
   }
+  if (packet.sessionId !== undefined && (!Number.isSafeInteger(packet.sessionId) || packet.sessionId < 1)) return null;
   return {
+    ...(packet.sessionId !== undefined ? { sessionId: packet.sessionId } : {}),
     data: packet.data,
     timestampUs: packet.timestampUs,
     sequence: packet.sequence,

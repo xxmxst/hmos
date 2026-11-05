@@ -151,6 +151,16 @@
         <span id="footer-state">准备就绪</span>
         <span class="privacy-note">截图与录屏按需保存到本机，画面、输入和 OCR 不会上传</span>
       </footer>
+      <div id="apk-drop-hint" class="apk-drop-hint" hidden>
+        <strong>松开以安装 APK</strong>
+        <span>安装到当前选择的 Android 设备<br>一次拖入一个 APK，保留已有应用数据</span>
+      </div>
+      <div id="apk-install-status" class="apk-install-status" role="status" aria-live="polite" hidden>
+        <strong><i class="spinner" aria-hidden="true"></i>正在安装 APK…</strong>
+        <span id="apk-install-file"></span>
+        <span id="apk-install-target"></span>
+        <small>若手机弹出安装授权，请在手机上确认。关闭窗口将等待安装结束。</small>
+      </div>
       <div id="toast" class="toast" role="status" aria-live="polite"></div>
     </div>
     <script type="module" src="/src/renderer/main.ts"></script>
