@@ -134,7 +134,11 @@ const pipeline = new VideoPipeline(
   (width, height, source) => {
     videoFrame = { width, height };
     videoFrameIsPlaceholder = source === "placeholder";
-    if (!videoFrameIsPlaceholder) window.hmRemote.reportMirrorSize({ width, height });
+    if (videoFrameIsPlaceholder) {
+      elements.loading.querySelector("span")!.textContent = "截图预览 · 正在等待实时画面…";
+    } else {
+      window.hmRemote.reportMirrorSize({ width, height });
+    }
     controlScreen = alignControlDimensionsToFrame(
       controlScreen,
       videoFrame,
@@ -219,6 +223,11 @@ window.hmRemote.onVideoRecovery((request) => {
   keyboard.suspend();
   pipeline.prepareRecovery(request);
   window.hmRemote.videoRecoveryReady(request.sessionId);
+});
+window.hmRemote.onVideoHealthProbe((request) => {
+  void pipeline.healthSample(request).then(sample => {
+    if (sample) window.hmRemote.reportVideoHealthSample(sample);
+  }).catch(() => {});
 });
 window.hmRemote.onStatus(updateStatus);
 window.hmRemote.onOcrProgress(updateOcrProgress);
@@ -556,7 +565,7 @@ function updateStatus(status: MirrorStatus): void {
   if (status.state === "idle" || status.state === "error" || status.state === "stopping") void recorder.stop();
   if (status.state === "reconnecting") { releaseScreenControls(); keyboard.suspend(); }
   connected = status.state === "streaming";
-  switching = status.video?.stage === "switching";
+  switching = status.video?.stage === "switching" || status.video?.stage === "recovering";
   sessionActive =
     status.state === "connecting"
     || status.state === "waiting-video"
@@ -572,6 +581,10 @@ function updateStatus(status: MirrorStatus): void {
   elements.statusTitle.textContent = stateTitle(status.state);
   elements.statusMessage.textContent = status.message;
   elements.footer.textContent = status.message;
+  const loadingMessage = status.state === "reconnecting" ? "正在恢复画面…"
+    : status.state === "waiting-video" ? status.message : "正在建立低延迟视频通道…";
+  elements.loading.querySelector("span")!.textContent = videoFrameIsPlaceholder
+    ? `截图预览 · ${loadingMessage}` : loadingMessage;
   elements.loading.hidden =
     status.state !== "connecting"
     && status.state !== "waiting-video"
@@ -585,7 +598,7 @@ function updateStatus(status: MirrorStatus): void {
   elements.profile.disabled = sessionActive;
   setControlsEnabled(connected && !ocrActive && !switching);
   updateConnectionButtons();
-  elements.screenTransition.hidden = !switching;
+  elements.screenTransition.hidden = status.video?.stage !== "switching";
   if (switching && !wasSwitching) {
     releaseScreenControls();
   }
@@ -614,7 +627,7 @@ function updateStatus(status: MirrorStatus): void {
     elements.empty.hidden = false;
     resetDimensionState();
   } else if (status.state === "error") {
-    if (status.videoSessionId !== undefined) pipeline.endVideoSession();
+    pipeline.endVideoSession();
     if (ocrActive) {
       void exitOcr();
     }

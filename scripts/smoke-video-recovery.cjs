@@ -20,6 +20,7 @@ if(!process.versions.electron){
   writeFileSync(join(userData,"window-state.json"),JSON.stringify({mode:"full"}));
   app.setPath("userData",userData);app.setPath("videos",videos);
   let mirror,window,dropVideo=false,freezePlayback=false,foreground=false,interceptInput=false,finished=false;
+  let portRepairs=0;
   const starts=[],preparations=[],statuses=[],input=[];
   processes.spawn=function(file,args,options){
     if(args?.includes("com.genymobile.scrcpy.Server"))starts.push({serial:args[1],profile:args.filter(x=>/^max_fps=|^video_bit_rate=|^max_size=/.test(x))});
@@ -35,6 +36,8 @@ if(!process.versions.electron){
           return prepare(request);
         };
         mirror.recovery.host.visible=()=>foreground;
+        const rebind=mirror.recovery.host.rebindPort;
+        mirror.recovery.host.rebindPort=async()=>{portRepairs++;dropVideo=false;return rebind();};
       }
       if(event==="status")statuses.push(args[0].state);
       if(event==="video"&&dropVideo)return true;
@@ -43,7 +46,9 @@ if(!process.versions.electron){
   };
   const on=ipcMain.on.bind(ipcMain),handle=ipcMain.handle.bind(ipcMain);
   ipcMain.on=(channel,listener)=>on(channel,(event,value,...rest)=>{
-    if(channel==="video:diagnostics"&&freezePlayback)value={...value,presentedFrames:1,monitorPlayback:true};
+    const freeze=health=>({...health,presentedFrames:1,decodedFrames:1,playbackTime:1});
+    if(channel==="video:diagnostics"&&freezePlayback)value=freeze(value);
+    if(channel==="video:health-sample"&&freezePlayback)value={...value,diagnostics:freeze(value.diagnostics)};
     return listener(event,value,...rest);
   });
   ipcMain.handle=(channel,listener)=>handle(channel,(event,...args)=>{
@@ -53,7 +58,7 @@ if(!process.versions.electron){
   app.on("browser-window-created",(_event,target)=>{target.show=()=>{};target.webContents.setBackgroundThrottling(false);});
   app.on("before-quit",event=>{if(!finished)event.preventDefault();});
   const pause=ms=>new Promise(done=>setTimeout(done,ms));
-  const deadline=setTimeout(()=>{console.error("Video recovery smoke timeout");finished=true;app.exit(1);},125000);
+  const deadline=setTimeout(()=>{console.error("Video recovery smoke timeout");finished=true;app.exit(1);},240000);
   async function until(check,label,timeout=22000){
     const end=Date.now()+timeout;
     while(Date.now()<end){if(await check())return;await pause(100);}
@@ -83,6 +88,8 @@ if(!process.versions.electron){
     const ready=(await run("window.hmRemote.listDevices()")).filter(d=>d.state==="ready");
     assert.equal(ready.length,1,"Live recovery test needs exactly one ready USB device");
     assert.equal(ready[0].backend,"adb");
+    await run("window.__testHidden=false;Object.defineProperty(document,'hidden',{configurable:true,get:()=>window.__testHidden});void 0");
+    foreground=true;
     await run("document.querySelector('#connect-button').click()");
     await until(connected,"initial stream");
     assert.equal(starts.length,1);
@@ -120,12 +127,26 @@ if(!process.versions.electron){
       clearTimeout(deadline);finished=true;app.quit();return;
     }
 
-    // 手机端持续出包，丢弃主进程到渲染端的包；准备恢复时解除故障。
-    let before=preparations.length;
+    const initialPreparations=preparations.length;
+    await pause(20000);
+    assert.equal(preparations.length,initialPreparations,"Healthy playback must not rebuild the decoder");
+    assert.equal(starts.length,1);
+    assert.equal(portRepairs,0);
+    assert.equal(await run("document.querySelector('#screen-transition').hidden"),true);
+    foreground=false;await run("window.__testHidden=true");freezePlayback=true;
+    await pause(6000);
+    assert.equal(preparations.length,initialPreparations,"Background playback must not trigger recovery");
+    freezePlayback=false;await run("window.__testHidden=false");foreground=true;
+    await pause(3500);
+    console.log("Healthy foreground/background playback caused no reset, reconnection or screen-adaptation banner");
+
+    // 手机端持续出包，丢弃主进程到渲染端的包；重绑后解除故障。
+    let before=portRepairs;
     foreground=true;dropVideo=true;
-    await until(()=>preparations.length>before,"MessagePort recovery");
-    assert.equal(preparations.at(-1).kind,"port");
-    await until(connected,"stream after port repair");foreground=false;
+    await until(()=>portRepairs>before,"MessagePort recovery");
+    assert.equal(preparations.length,initialPreparations,"Port rebinding must preserve the decoder");
+    await until(connected,"stream after port repair");
+    await until(()=>mirror.recovery.task===null,"port recovery confirmed");
     assert.equal(starts.length,1,"Port repair must not restart scrcpy");
     assert(await recording());
     console.log("MessagePort interruption recovered without restarting the device service");
@@ -134,7 +155,9 @@ if(!process.versions.electron){
     foreground=true;freezePlayback=true;
     await until(()=>preparations.length>before,"decoder recovery");
     assert.equal(preparations.at(-1).kind,"decoder");
-    await until(connected,"stream after decoder repair");foreground=false;
+    await until(connected,"stream after decoder repair");
+    await until(()=>mirror.recovery.task===null,"decoder recovery confirmed");
+    assert.equal(await run("document.querySelector('#screen-transition').hidden"),true);
     assert.equal(starts.length,1,"Decoder repair must not restart scrcpy");
     assert(await recording());
     console.log("Playback stall recovered by rebuilding the decoder and requesting fresh video");
@@ -143,11 +166,14 @@ if(!process.versions.electron){
     await run("document.querySelector('#screen-power-button').click()");
     await until(()=>run("document.querySelector('#screen-power-button').getAttribute('aria-pressed')==='true'"),"physical screen off");
     await until(async()=> (await physicalPower()).every(mode=>mode==="Off"),"physical panels off");
-    const cutAt=Date.now();
     mirror.videoSocket.pause();
-    await until(()=>starts.length===2,"silent source automatically restarted",30000);
+    const lastPacketAt=mirror.recovery.lastSource;
+    await execFile(join(process.cwd(),"vendor/scrcpy/adb.exe"),["-s",serial(),"shell","cmd","statusbar","expand-notifications"],{windowsHide:true,timeout:5000,encoding:"utf8"});
+    await until(()=>starts.length===2,"changed phone picture confirms source interruption",95000);
     await until(connected,"stream after source restart");
-    assert(Date.now()-cutAt>=10000,"Silent input must be probed before reconnecting");
+    await until(()=>mirror.recovery.task===null,"source recovery confirmed");
+    await execFile(join(process.cwd(),"vendor/scrcpy/adb.exe"),["-s",serial(),"shell","cmd","statusbar","collapse"],{windowsHide:true,timeout:5000,encoding:"utf8"});
+    assert(Date.now()-lastPacketAt>=60000,"Silent input must be monitored for a full minute before reconnecting");
     assert.equal(mirror.status.screenPowerOff,true);
     await until(async()=> (await physicalPower()).every(mode=>mode==="Off"),"off mode restored after reconnect");
     assert(await recording());
@@ -156,6 +182,7 @@ if(!process.versions.electron){
     mirror.child.kill();
     await until(()=>starts.length===3,"server exit automatically restarted");
     await until(connected,"stream after server exit");
+    await until(()=>mirror.recovery.task===null,"transport recovery confirmed");
     assert(await recording());
     assert(starts.every(start=>start.serial===starts[0].serial));
     assert(starts.every(start=>JSON.stringify(start.profile)===JSON.stringify(starts[0].profile)));
@@ -191,6 +218,7 @@ if(!process.versions.electron){
   }).catch(async error=>{
     clearTimeout(deadline);foreground=false;dropVideo=false;freezePlayback=false;
     console.error(error);
+    if(starts.length) await execFile(join(process.cwd(),"vendor/scrcpy/adb.exe"),["-s",serial(),"shell","cmd","statusbar","collapse"],{windowsHide:true,timeout:5000,encoding:"utf8"}).catch(()=>{});
     await mirror?.stop().catch(()=>{});
     finished=true;app.exit(1);
   });

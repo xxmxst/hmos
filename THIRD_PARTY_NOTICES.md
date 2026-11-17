@@ -2,10 +2,10 @@
 
 ## HOScrcpy SDK
 
-- 版本：v1.0.15-beta
+- 版本：v1.0.18-beta
 - 来源：https://gitcode.com/OpenHarmonyToolkitsPlaza/HOScrcpy
-- 下载：https://gitcode.com/OpenHarmonyToolkitsPlaza/HOScrcpy/releases/tag/v1.0.15-beta
-- SHA-256：`d2b8091faf75ccda27a1b5b7a8eea2791a2d99c06a1ade8b491ec4679fbdd649`
+- 下载（dsh-hos-scrcpy 的固定公开提交）：https://raw.githubusercontent.com/ns-zzj/dsh-hos-scrcpy/c2f94df15542d471f8c5d9908a78e335041caa4f/resources/hosScrcpy-1.0.18-beta.jar
+- SHA-256：`2ce60b1893cc2be471a8cd7eab7e4127e41921f1f89a32a134c730ba15c8c0fd`
 
 仓库中的许可证模板信息不完整。在作者明确授予二进制再分发许可之前，不应公开
 发布内含该 SDK JAR 的安装包。

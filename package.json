@@ -1,6 +1,6 @@
 {
   "name": "hm-remote",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "通过 USB 投屏并控制鸿蒙和 Android 设备的 Windows 桌面工具",
   "main": "dist/main/main.cjs",
@@ -87,8 +87,8 @@
         "to": "bridge/hmremote-bridge.jar"
       },
       {
-        "from": "vendor/sdk/hosScrcpy-1.0.15-beta.jar",
-        "to": "sdk/hosScrcpy-1.0.15-beta.jar"
+        "from": "vendor/sdk/hosScrcpy-1.0.18-beta.jar",
+        "to": "sdk/hosScrcpy-1.0.18-beta.jar"
       },
       {
         "from": "vendor/hdc",

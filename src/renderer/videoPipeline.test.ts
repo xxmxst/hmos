@@ -202,7 +202,7 @@ describe("VideoPipeline dual MediaSource lifecycle", () => {
     expect(pipeline.canControl()).toBe(true);
     expect(canvas.hidden).toBe(true);
     expect(pipeline.canControl()).toBe(true);
-    expect(onDiagnostics).toHaveBeenLastCalledWith(expect.objectContaining({ sessionId: 2, presentedFrames: 1, stage: "decoding" }));
+    expect(onDiagnostics).toHaveBeenLastCalledWith(expect.objectContaining({ sessionId: 2, presentedFrames: 0, frameReady: true, stage: "decoding" }));
     pipeline.dispose();
   });
 
@@ -220,7 +220,7 @@ describe("VideoPipeline dual MediaSource lifecycle", () => {
     callback(0, {} as VideoFrameCallbackMetadata);
     await vi.advanceTimersByTimeAsync(2000);
     expect(onDiagnostics.mock.calls.length).toBeGreaterThan(first);
-    expect(onDiagnostics).toHaveBeenLastCalledWith(expect.objectContaining({ sessionId: 10, packets: 1, presentedFrames: 2 }));
+    expect(onDiagnostics).toHaveBeenLastCalledWith(expect.objectContaining({ sessionId: 10, packets: 1, presentedFrames: 1 }));
     const stale = callback;
     pipeline.reset();
     const count = onDiagnostics.mock.calls.length;
@@ -228,6 +228,30 @@ describe("VideoPipeline dual MediaSource lifecycle", () => {
     await vi.advanceTimersByTimeAsync(10000);
     expect(onDiagnostics).toHaveBeenCalledTimes(count);
     expect(primary.element.cancelVideoFrameCallback).toHaveBeenCalled();
+  });
+
+  it("samples decode/time progress even when the frame callback exists but is not firing", async () => {
+    vi.useFakeTimers();
+    const { pipeline, primary, onDiagnostics } = fixture();
+    let decoded = 3;
+    primary.element.requestVideoFrameCallback = vi.fn(() => 1);
+    primary.element.cancelVideoFrameCallback = vi.fn();
+    primary.element.getVideoPlaybackQuality = vi.fn(() => ({ totalVideoFrames: decoded } as VideoPlaybackQuality));
+    Object.assign(primary.element, { currentTime: 1 });
+    await pipeline.initialize();
+    pipeline.prepareRecovery({ sessionId: 20, kind: "initial" });
+    pipeline.feed({ ...packet(), sessionId: 20 });
+    primary.emit("loadeddata"); pipeline.setPortReady(true);
+    expect(onDiagnostics).toHaveBeenLastCalledWith(expect.objectContaining({ presentedFrames: 0, decodedFrames: 3, playbackTime: 1 }));
+    decoded = 12; Object.assign(primary.element, { currentTime: 2 });
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(onDiagnostics).toHaveBeenLastCalledWith(expect.objectContaining({ presentedFrames: 0, decodedFrames: 12, playbackTime: 2 }));
+    const count = muxerState.instances.length;
+    const health = await pipeline.healthSample({ sessionId: 20, requestId: 1, captureFrame: false });
+    expect(health?.diagnostics).toMatchObject({ frameReady: true, decodedFrames: 12 });
+    expect(muxerState.instances).toHaveLength(count);
+    expect(await pipeline.healthSample({ sessionId: 19, requestId: 2, captureFrame: false })).toBeNull();
+    pipeline.dispose();
   });
 
   it("destroys both decoder slots for a reconnect", async () => {
@@ -275,10 +299,12 @@ describe("VideoPipeline dual MediaSource lifecycle", () => {
     expect(activeMuxer.destroy).not.toHaveBeenCalled();
     expect(muxerState.instances).toHaveLength(2);
     expect(muxerState.instances[1]!.feed).toHaveBeenCalledOnce();
-    expect(onDiagnostics).toHaveBeenLastCalledWith(expect.objectContaining({ stage: "switching" }));
+    expect(onDiagnostics).toHaveBeenLastCalledWith(expect.objectContaining({ stage: "recovering" }));
     expect(pipeline.canControl()).toBe(false);
 
     Object.assign(secondary.element, { videoWidth: 1848, videoHeight: 1264 });
+    secondary.emit("loadedmetadata");
+    expect(onDiagnostics).toHaveBeenLastCalledWith(expect.objectContaining({ stage: "switching" }));
     secondary.emit("loadeddata");
 
     expect(primary.element.hidden).toBe(true);
@@ -365,7 +391,7 @@ describe("VideoPipeline dual MediaSource lifecycle", () => {
     expect(standby.destroy).toHaveBeenCalledOnce();
     expect(primary.element.hidden).toBe(false);
     expect(requestIdr).toHaveBeenCalledOnce();
-    expect(onDiagnostics).toHaveBeenLastCalledWith(expect.objectContaining({ stage: "switching" }));
+    expect(onDiagnostics).toHaveBeenLastCalledWith(expect.objectContaining({ stage: "recovering" }));
 
     await vi.advanceTimersByTimeAsync(4_000);
     expect(onDiagnostics).not.toHaveBeenLastCalledWith(expect.objectContaining({ stage: "error" }));
@@ -392,20 +418,27 @@ describe("VideoPipeline dual MediaSource lifecycle", () => {
     }));
   });
 
-  it("reports an error when the ready port receives no packets", async () => {
+  it("accepts the first HarmonyOS packet after a slow device startup", async () => {
     vi.useFakeTimers();
-    const { onDiagnostics, pipeline } = fixture();
+    const { primary, onDiagnostics, pipeline } = fixture();
     await pipeline.initialize();
     pipeline.beginSession();
     pipeline.setPortReady(true);
 
-    await vi.advanceTimersByTimeAsync(8_000);
-
+    await vi.advanceTimersByTimeAsync(15_000);
     expect(onDiagnostics).toHaveBeenLastCalledWith(expect.objectContaining({
-      stage: "error",
-      packets: 0,
-      bytes: 0
+      stage: "waiting-stream",
+      packets: 0
     }));
+
+    pipeline.feed(packet());
+    primary.emit("loadeddata");
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(onDiagnostics).toHaveBeenLastCalledWith(expect.objectContaining({
+      stage: "decoding",
+      packets: 1
+    }));
+    expect(pipeline.canControl()).toBe(true);
   });
 
   it("reports the video port handshake stage", async () => {

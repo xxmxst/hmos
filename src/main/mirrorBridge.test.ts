@@ -72,7 +72,7 @@ describe("MirrorBridge capture recovery", () => {
 
   });
 
-  it("fails instead of waiting forever when ready produces no video packet", async () => {
+  it("prompts the user when ready produces no video, and accepts a later first frame", async () => {
     vi.useFakeTimers();
     const { bridge, target } = fixture();
 
@@ -85,11 +85,28 @@ describe("MirrorBridge capture recovery", () => {
     await vi.advanceTimersByTimeAsync(12_000);
 
     expect(bridge.status).toMatchObject({
-      state: "error",
-      video: { stage: "error", packets: 0 }
+      state: "waiting-video",
+      message: expect.stringContaining("滑动"),
+      video: { packets: 0 }
     });
-    expect(bridge.serial).toBeNull();
+    expect(bridge.serial).toBe("device");
+    target.markCaptureRecovered();
+    bridge.updateVideoDiagnostics({ ...bridge.status.video!, stage: "decoding", packets: 1 });
+    await vi.advanceTimersByTimeAsync(12_000);
+    expect(bridge.status).toMatchObject({ state: "streaming", video: { packets: 1 } });
   });
+
+  it("keeps the live picture when the SDK reports ready again", async () => {
+    vi.useFakeTimers();
+    const { bridge, target } = fixture();
+    const ready: BridgeJsonMessage = { type: "event", event: "ready", width: 1264, height: 1848 };
+    target.handleJson(ready);
+    bridge.updateVideoDiagnostics({ ...bridge.status.video!, stage: "decoding", packets: 1 });
+    target.handleJson(ready);
+    await vi.advanceTimersByTimeAsync(25_000);
+    expect(bridge.status).toMatchObject({ state: "streaming", video: { stage: "decoding", packets: 1 } });
+  });
+
   it("accepts the first video packet as recovery even if ready is missing", async () => {
     vi.useFakeTimers();
     const { bridge, target } = fixture();

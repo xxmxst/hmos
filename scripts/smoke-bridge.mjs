@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { delimiter, join } from "node:path";
 
 const bridgeJar = join("bridge", "build", "hmremote-bridge.jar");
-const sdkJar = join("vendor", "sdk", "hosScrcpy-1.0.15-beta.jar");
+const sdkJar = join("vendor", "sdk", "hosScrcpy-1.0.18-beta.jar");
 const classPath = `${bridgeJar}${delimiter}${sdkJar}`;
 const vendorJava = join(
   "vendor",

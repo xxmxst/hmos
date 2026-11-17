@@ -4,9 +4,9 @@ import { Readable } from "node:stream";
 import { finished } from "node:stream/promises";
 
 const url =
-  "https://gitcode.com/OpenHarmonyToolkitsPlaza/HOScrcpy/releases/download/v1.0.15-beta/hosScrcpy-1.0.15-beta.jar";
-const expectedSha256 = "d2b8091faf75ccda27a1b5b7a8eea2791a2d99c06a1ade8b491ec4679fbdd649";
-const destination = "vendor/sdk/hosScrcpy-1.0.15-beta.jar";
+  "https://raw.githubusercontent.com/ns-zzj/dsh-hos-scrcpy/c2f94df15542d471f8c5d9908a78e335041caa4f/resources/hosScrcpy-1.0.18-beta.jar";
+const expectedSha256 = "2ce60b1893cc2be471a8cd7eab7e4127e41921f1f89a32a134c730ba15c8c0fd";
+const destination = "vendor/sdk/hosScrcpy-1.0.18-beta.jar";
 
 const checksum = (path) => createHash("sha256").update(readFileSync(path)).digest("hex");
 

@@ -24,6 +24,8 @@ import type {
   StartOptions,
   VideoDiagnostics,
   VideoRecoveryRequest,
+  VideoHealthProbeResponse,
+  VideoHealthSample,
   VideoStage
 } from "../shared/types";
 import { isVideoPortReadyMessage } from "../shared/videoPort";
@@ -36,6 +38,8 @@ import { validateImage } from "./deviceSnapshot";
 import { RecordingFile } from "./recordingFile";
 import { createRecordingPath } from "./recordingDestination";
 import { AdbMirror } from "./adbMirror";
+import { compareVideoThumbnails } from "./videoFrameComparison";
+import { RecoveryLog } from "./recoveryLog";
 import { inspectScrcpy } from "./androidTools";
 import { MirrorBridge, type VideoPacket } from "./mirrorBridge";
 import { OcrService } from "./ocrService";
@@ -50,9 +54,13 @@ let videoPortReady = false;
 const paths = resolveRuntimePaths();
 const hdc = paths.hdc ? new HdcClient(paths.hdc) : null;
 const harmonyMirror = new MirrorBridge(paths);
+const recoveryLog = new RecoveryLog(() => join(app.getPath("userData"), "video-recovery.log"));
 const androidMirror = new AdbMirror(paths, {
   prepare: prepareAndroidVideo,
-  visible: () => !!mainWindow && mainWindow.isVisible() && !mainWindow.isMinimized()
+  visible: () => !!mainWindow && mainWindow.isVisible() && !mainWindow.isMinimized(),
+  rebindPort: async () => { if (mainWindow) attachVideoPort(mainWindow.webContents); },
+  probe: sampleAndroidVideo,
+  log: (event) => recoveryLog.write(event)
 });
 let mirror: MirrorBridge | AdbMirror = harmonyMirror;
 let mirrorBusy = false;
@@ -114,6 +122,7 @@ function createWindow(): void {
     }
   });
   mainWindow.on("closed", () => {
+    for (const pending of healthProbes.values()) pending.finish(null);
     videoPort?.close();
     videoPort = null;
     videoPortReady = false;
@@ -127,6 +136,59 @@ let videoPreparation: {
   acknowledged: boolean;
   finish(error?: Error): void;
 } | null = null;
+
+let healthRequestId = 0;
+const healthProbes = new Map<number, { sessionId: number; finish(value: VideoHealthProbeResponse | null): void }>();
+
+function requestAndroidHealth(sessionId: number, captureFrame: boolean): Promise<VideoHealthProbeResponse | null> {
+  const target = mainWindow?.webContents;
+  if (!target || target.isDestroyed() || sessionId !== androidMirror.videoSessionId) return Promise.resolve(null);
+  const requestId = ++healthRequestId;
+  return new Promise(resolve => {
+    const timer = setTimeout(() => pending.finish(null), 2_000);
+    const pending = { sessionId, finish(value: VideoHealthProbeResponse | null) {
+      if (!healthProbes.delete(requestId)) return;
+      clearTimeout(timer);
+      resolve(value);
+    } };
+    healthProbes.set(requestId, pending);
+    target.send("video:health-probe", { requestId, sessionId, captureFrame });
+  });
+}
+
+ipcMain.on("video:health-sample", (event, value: unknown) => {
+  if (mainWindow?.webContents !== event.sender || !value || typeof value !== "object") return;
+  const item = value as Partial<VideoHealthProbeResponse>;
+  if (!Number.isSafeInteger(item.requestId)) return;
+  const pending = healthProbes.get(item.requestId!);
+  const diagnostics = parseVideoDiagnostics(item.diagnostics);
+  if (!pending || !diagnostics || diagnostics.sessionId !== pending.sessionId) return;
+  pending.finish({ requestId: item.requestId!, diagnostics,
+    ...(item.image instanceof ArrayBuffer && item.image.byteLength <= 1024 * 1024 ? { image: item.image } : {}) });
+});
+
+async function sampleAndroidVideo(sessionId: number, captureFrame: boolean): Promise<VideoHealthSample | null> {
+  const reply = await requestAndroidHealth(sessionId, captureFrame);
+  if (!reply || sessionId !== androidMirror.videoSessionId) return null;
+  const result: VideoHealthSample = { diagnostics: reply.diagnostics, comparison: "unknown" };
+  const serial = androidMirror.serial;
+  if (!captureFrame || !reply.image || !reply.diagnostics.monitorPlayback || !reply.diagnostics.frameReady || !paths.adb || !serial) return result;
+  try {
+    const phone = nativeImage.createFromBuffer(await new AdbClient(paths.adb).capturePng(serial, 3_000));
+    if (serial !== androidMirror.serial || sessionId !== androidMirror.videoSessionId || phone.isEmpty()) return null;
+    const size = phone.getSize(), frame = nativeImage.createFromBuffer(Buffer.from(reply.image));
+    const ratio = (reply.diagnostics.frameWidth ?? 0) / (reply.diagnostics.frameHeight ?? 0);
+    if (!Number.isFinite(ratio) || ratio <= 0 || Math.abs(size.width / size.height - ratio) / ratio > 0.02
+      || frame.isEmpty() || frame.getSize().width !== 64 || frame.getSize().height !== 64) return result;
+    const phoneBytes = phone.resize({ width: 64, height: 64, quality: "good" }).toBitmap();
+    // A protected screenshot may be all black even when a compositor frame is available.
+    let nonBlack = 0;
+    for (let index = 0; index < phoneBytes.length; index += 4) if (Math.max(phoneBytes[index]!, phoneBytes[index + 1]!, phoneBytes[index + 2]!) > 8) nonBlack++;
+    if (nonBlack < 40) return result;
+    result.comparison = compareVideoThumbnails(phoneBytes, frame.toBitmap());
+  } catch { /* An unavailable screenshot is not evidence of a frozen video. */ }
+  return result;
+}
 
 function prepareAndroidVideo(request: VideoRecoveryRequest): Promise<void> {
   videoPreparation?.finish(new Error("视频恢复请求已替换"));
@@ -469,7 +531,7 @@ app.on("before-quit", (event) => {
   quitCleanupStarted = true;
   void (async () => {
     await mirrorStartTask?.catch(() => {});
-    await Promise.allSettled([ocr.dispose(), mirror.stop()]);
+    await Promise.allSettled([ocr.dispose(), mirror.stop(), recoveryLog.flush()]);
     app.quit();
   })();
 });
@@ -488,6 +550,7 @@ const VIDEO_STAGES = new Set<VideoStage>([
   "waiting-frame",
   "decoding",
   "switching",
+  "recovering",
   "error"
 ]);
 
@@ -513,10 +576,20 @@ function parseVideoDiagnostics(value: unknown): VideoDiagnostics | null {
   if (item.sessionId !== undefined && (!Number.isSafeInteger(item.sessionId) || item.sessionId < 1
     || !Number.isSafeInteger(item.presentedFrames) || item.presentedFrames! < 0
     || typeof item.monitorPlayback !== "boolean")) return null;
+  for (const value of [item.decodedFrames, item.frameWidth, item.frameHeight]) {
+    if (value !== undefined && (!Number.isSafeInteger(value) || value < 0)) return null;
+  }
+  if (item.playbackTime !== undefined && (!Number.isFinite(item.playbackTime) || item.playbackTime < 0)) return null;
+  if (item.frameReady !== undefined && typeof item.frameReady !== "boolean") return null;
   return {
     ...(item.sessionId !== undefined ? {
       sessionId: item.sessionId,
       presentedFrames: item.presentedFrames!,
+      ...(item.decodedFrames !== undefined ? { decodedFrames: item.decodedFrames } : {}),
+      ...(item.playbackTime !== undefined ? { playbackTime: item.playbackTime } : {}),
+      ...(item.frameReady !== undefined ? { frameReady: item.frameReady } : {}),
+      ...(item.frameWidth !== undefined ? { frameWidth: item.frameWidth } : {}),
+      ...(item.frameHeight !== undefined ? { frameHeight: item.frameHeight } : {}),
       monitorPlayback: item.monitorPlayback!
     } : {}),
     stage: item.stage,

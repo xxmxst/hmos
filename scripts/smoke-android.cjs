@@ -17,9 +17,9 @@ if (!process.versions.electron) {
   const inputCommands = [];
   const registerHandler = ipcMain.handle.bind(ipcMain);
   ipcMain.handle = (channel, handler) => registerHandler(channel, channel === "mirror:control"
-    ? (event, command) => {
+    ? (event, command, ...rest) => {
       if (interceptControl) { inputCommands.push(command); return; }
-      return handler(event, command);
+      return handler(event, command, ...rest);
     } : handler);
   const output = resolve(process.cwd(), ".tmp", `android-smoke-${Date.now()}`);
   mkdirSync(output, { recursive: true });

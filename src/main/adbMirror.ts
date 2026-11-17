@@ -3,7 +3,7 @@ import { randomInt } from "node:crypto";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { createConnection, type Socket } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
-import type { ControlCommand, DeviceScreen, MirrorStatus, StartOptions, VideoDiagnostics, VideoRecoveryRequest } from "../shared/types";
+import type { ControlCommand, DeviceScreen, MirrorStatus, StartOptions, VideoDiagnostics, VideoRecoveryRequest, VideoHealthSample } from "../shared/types";
 import { VIDEO_PROFILES } from "../shared/types";
 import { AdbClient, validateAdbSerial } from "./adb";
 import { inspectScrcpy } from "./androidTools";
@@ -43,6 +43,9 @@ export class AdbMirror extends EventEmitter {
   constructor(private readonly paths: RuntimePaths, hooks?: {
     prepare(request: VideoRecoveryRequest): Promise<void>;
     visible(): boolean;
+    rebindPort(): Promise<void>;
+    probe(sessionId: number, captureFrame: boolean): Promise<VideoHealthSample | null>;
+    log(event: import("./recoveryLog").RecoveryLogEvent): void;
   }) {
     super();
     this.recovery = new VideoRecovery({
@@ -51,7 +54,9 @@ export class AdbMirror extends EventEmitter {
         return hooks?.prepare(request) ?? Promise.resolve();
       },
       visible: () => hooks?.visible() ?? true,
-      canResetVideo: () => this.major > 3 || (this.major === 3 && this.minor >= 3),
+      rebindPort: () => hooks?.rebindPort() ?? Promise.resolve(),
+      probe: (capture) => hooks?.probe(this.videoSessionId, capture) ?? Promise.resolve(null),
+      log: (event) => hooks?.log(event),
       resetVideo: () => this.resetVideo(),
       verifyDevice: () => this.verifyRecoveryDevice(),
       restart: () => this.reconnect(),
@@ -257,7 +262,8 @@ export class AdbMirror extends EventEmitter {
       return;
     }
     if (!this.recovery.diagnostics(video) || ["error", "stopping", "idle"].includes(this.currentStatus.state)) return;
-    const streaming = video.stage === "decoding" || video.stage === "switching";
+    const streaming = ["decoding", "switching", "recovering"].includes(video.stage)
+      || (video.stage === "waiting-port" && video.frameReady === true);
     const recovering = this.recovery.recovering;
     this.currentStatus = { ...this.currentStatus, video,
       state: recovering ? "reconnecting" : streaming ? "streaming" : "waiting-video",

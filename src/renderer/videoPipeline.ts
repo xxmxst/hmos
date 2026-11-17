@@ -4,6 +4,8 @@ import type {
   ScreenPlaceholder,
   VideoDiagnostics,
   VideoRecoveryRequest,
+  VideoHealthProbeRequest,
+  VideoHealthProbeResponse,
   VideoStage
 } from "../shared/types";
 import { H264StreamNormalizer } from "./h264Stream";
@@ -22,12 +24,12 @@ interface DecoderSlot {
   readonly video: HTMLVideoElement;
   muxer: JMuxer | null;
   configurationVersion: number;
+  metadataReady: boolean;
   generation: number;
   removeListeners: (() => void) | null;
 }
 
 const INITIAL_RECOVERY_DELAY_MS = 3_000;
-const VIDEO_DATA_TIMEOUT_MS = 8_000;
 const TRANSITION_DECODE_TIMEOUT_MS = 1_500;
 const TRANSITION_RETRY_DELAY_MS = 2_000;
 const PLACEHOLDER_DELAY_MS = 500;
@@ -58,7 +60,6 @@ export class VideoPipeline {
   private placeholderVisible = false;
   private initialRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
   private failureTimer: ReturnType<typeof setTimeout> | null = null;
-  private streamTimer: ReturnType<typeof setTimeout> | null = null;
   private transitionTimer: ReturnType<typeof setTimeout> | null = null;
   private transitionRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private placeholderTimer: ReturnType<typeof setTimeout> | null = null;
@@ -90,11 +91,6 @@ export class VideoPipeline {
 
   setPortReady(ready: boolean): void {
     this.portReady = ready;
-    if (ready) {
-      this.startStreamTimer();
-    } else {
-      this.clearStreamTimer();
-    }
     this.reportDiagnostics(true);
   }
 
@@ -123,7 +119,6 @@ export class VideoPipeline {
     } else {
       this.targetSlot.configurationVersion = 0;
     }
-    this.startStreamTimer();
     this.startPlaceholderTimer();
     this.requestIdr();
     this.reportDiagnostics(true);
@@ -161,7 +156,6 @@ export class VideoPipeline {
     if (bytes.byteLength === 0) {
       return;
     }
-    this.clearStreamTimer();
     this.packets++;
     this.bytes += bytes.byteLength;
     if (!this.visibleSlot) {
@@ -233,6 +227,10 @@ export class VideoPipeline {
   endVideoSession(): void {
     this.active = false;
     this.clearTimers();
+    if (this.placeholderVisible) {
+      this.placeholderVisible = false;
+      this.canvas.hidden = true;
+    }
   }
 
   dispose(): void {
@@ -309,6 +307,7 @@ export class VideoPipeline {
       video,
       muxer: null,
       configurationVersion: 0,
+      metadataReady: false,
       generation: 0,
       removeListeners: null
     };
@@ -362,6 +361,7 @@ export class VideoPipeline {
     const muxer = slot.muxer;
     slot.muxer = null;
     slot.configurationVersion = 0;
+    slot.metadataReady = false;
     slot.video.hidden = true;
     if (muxer) {
       muxer.destroy();
@@ -445,7 +445,6 @@ export class VideoPipeline {
     this.visibleSlot = slot;
     this.targetSlot = null;
     this.rebuilding = false;
-    this.presentedFrames++;
     if (this.videoSessionId !== undefined) this.trackPresentation(slot);
     this.recoveryAttempted = false;
     this.configurationChangePending = false;
@@ -464,6 +463,11 @@ export class VideoPipeline {
   }
 
   private handleMetadata(slot: DecoderSlot, generation: number): void {
+    if (this.active && slot.generation === generation && slot === this.targetSlot && slot !== this.visibleSlot) {
+      slot.metadataReady = true;
+      this.reportDiagnostics(true);
+      return;
+    }
     if (
       !this.active
       || slot.generation !== generation
@@ -597,19 +601,6 @@ export class VideoPipeline {
     }, TRANSITION_RETRY_DELAY_MS);
   }
 
-  private startStreamTimer(): void {
-    if (this.videoSessionId !== undefined) return;
-    if (!this.active || !this.portReady || this.packets !== 0 || this.streamTimer) {
-      return;
-    }
-    this.streamTimer = setTimeout(() => {
-      this.streamTimer = null;
-      if (this.active && this.packets === 0) {
-        this.fail(this.failureMessage());
-      }
-    }, VIDEO_DATA_TIMEOUT_MS);
-  }
-
   private startPlaceholderTimer(): void {
     if (!this.loadPlaceholder) {
       return;
@@ -691,8 +682,12 @@ export class VideoPipeline {
     if (!this.portReady) {
       return "waiting-port";
     }
+    if (this.rebuilding) return "recovering";
     if (this.visibleSlot) {
-      return this.isSwitching() ? "switching" : "decoding";
+      if (!this.isSwitching()) return "decoding";
+      const target = this.targetSlot?.video, current = this.visibleSlot.video;
+      return target && this.targetSlot?.metadataReady && target.videoWidth > 0 && target.videoHeight > 0
+        && (target.videoWidth !== current.videoWidth || target.videoHeight !== current.videoHeight) ? "switching" : "recovering";
     }
     if (this.packets === 0) {
       return "waiting-stream";
@@ -728,6 +723,7 @@ export class VideoPipeline {
       ...(this.videoSessionId !== undefined ? {
         sessionId: this.videoSessionId,
         presentedFrames: this.presentedFrames,
+        ...this.playbackHealth(),
         monitorPlayback: this.monitorPlayback()
       } : {}),
       stage,
@@ -743,9 +739,6 @@ export class VideoPipeline {
 
   private failureMessage(): string {
     const state = this.normalizer.state;
-    if (this.packets === 0) {
-      return "视频通道已建立，但渲染进程没有收到视频数据";
-    }
     if (state.framing === "unknown") {
       return `已收到 ${this.packets} 个视频包，但无法识别 H.264 数据格式`;
     }
@@ -792,22 +785,44 @@ export class VideoPipeline {
     this.clearTransitionRetryTimer();
   }
 
-  private clearStreamTimer(): void {
-    if (this.streamTimer) {
-      clearTimeout(this.streamTimer);
-      this.streamTimer = null;
-    }
-  }
-
   private clearTimers(): void {
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     this.heartbeatTimer = null;
     this.cancelPresentation?.();
     this.cancelPresentation = null;
     this.presentationSerial++;
-    this.clearStreamTimer();
     this.clearInitialTimers();
     this.clearTransitionTimers();
+  }
+
+  private playbackHealth(): Pick<VideoDiagnostics, "decodedFrames" | "playbackTime" | "frameReady" | "frameWidth" | "frameHeight"> {
+    const video = this.visibleSlot?.video;
+    const total = video?.getVideoPlaybackQuality?.().totalVideoFrames ?? 0;
+    return {
+      decodedFrames: Number.isSafeInteger(total) && total >= 0 ? total : 0,
+      playbackTime: video && Number.isFinite(video.currentTime) && video.currentTime >= 0 ? video.currentTime : 0,
+      frameReady: !this.rebuilding && !!video && video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0,
+      frameWidth: video?.videoWidth ?? 0,
+      frameHeight: video?.videoHeight ?? 0
+    };
+  }
+
+  async healthSample(request: VideoHealthProbeRequest): Promise<VideoHealthProbeResponse | null> {
+    if (!this.active || request.sessionId !== this.videoSessionId) return null;
+    const diagnostics = this.buildDiagnostics(this.currentStage());
+    const result: VideoHealthProbeResponse = { requestId: request.requestId, diagnostics };
+    const video = this.visibleSlot?.video;
+    if (request.captureFrame && diagnostics.frameReady && diagnostics.monitorPlayback && video) {
+      const canvas = document.createElement("canvas");
+      canvas.width = canvas.height = 64;
+      const context = canvas.getContext("2d");
+      if (context) {
+        context.drawImage(video, 0, 0, 64, 64);
+        const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, "image/png"));
+        if (blob) result.image = await blob.arrayBuffer();
+      }
+    }
+    return request.sessionId === this.videoSessionId && this.active ? result : null;
   }
 
   private trackPresentation(slot: DecoderSlot): void {

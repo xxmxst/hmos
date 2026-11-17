@@ -13,6 +13,7 @@ import type {
   StartOptions,
   VideoDiagnostics,
   VideoRecoveryRequest,
+  VideoHealthProbeRequest,
   WindowState
 } from "../shared/types";
 import { VIDEO_PORT_WINDOW_MESSAGE } from "../shared/videoPort";
@@ -84,6 +85,12 @@ const api: HmRemoteApi = {
     return () => ipcRenderer.removeListener("video:recover", listener);
   },
   videoRecoveryReady: (sessionId) => ipcRenderer.send("video:recovery-ready", sessionId),
+  onVideoHealthProbe: (callback) => {
+    const listener = (_event: Electron.IpcRendererEvent, request: VideoHealthProbeRequest) => callback(request);
+    ipcRenderer.on("video:health-probe", listener);
+    return () => ipcRenderer.removeListener("video:health-probe", listener);
+  },
+  reportVideoHealthSample: (sample) => ipcRenderer.send("video:health-sample", sample),
   reportVideoDiagnostics: (diagnostics: VideoDiagnostics) =>
     ipcRenderer.send("video:diagnostics", diagnostics),
   pasteClipboard: () => ipcRenderer.invoke("clipboard:paste", controlSessionId) as Promise<void>,

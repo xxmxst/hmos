@@ -3,7 +3,7 @@ export const CAPTURE_RECOVERY_TIMEOUT_MS = 12_000;
 type TimeoutHandle = ReturnType<typeof setTimeout>;
 
 export interface CaptureRecoveryTimeout {
-  kind: "transport" | "first-frame";
+  kind: "transport" | "ready" | "first-frame";
   message: string;
 }
 
@@ -28,8 +28,12 @@ export class CaptureRecoveryGate {
     return true;
   }
 
+  awaitReady(message: string): void {
+    if (!this.active) this.arm({ kind: "ready", message }, false);
+  }
+
   awaitFirstFrame(message: string): void {
-    this.arm({ kind: "first-frame", message }, true);
+    this.arm({ kind: "first-frame", message }, this.latestTimeout?.kind !== "first-frame");
   }
 
   recovered(): void {

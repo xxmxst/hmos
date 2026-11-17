@@ -87,7 +87,7 @@ export function resolveRuntimePaths(): RuntimePaths {
       ? join(root, "bridge", "hmremote-bridge.jar")
       : join(root, "bridge", "build", "hmremote-bridge.jar"),
     sdkJar: app.isPackaged
-      ? join(root, "sdk", "hosScrcpy-1.0.15-beta.jar")
-      : join(root, "vendor", "sdk", "hosScrcpy-1.0.15-beta.jar")
+      ? join(root, "sdk", "hosScrcpy-1.0.18-beta.jar")
+      : join(root, "vendor", "sdk", "hosScrcpy-1.0.18-beta.jar")
   };
 }

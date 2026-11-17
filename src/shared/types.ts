@@ -19,6 +19,7 @@ export type VideoStage =
   | "waiting-frame"
   | "decoding"
   | "switching"
+  | "recovering"
   | "error";
 
 export interface VideoRecoveryRequest {
@@ -26,9 +27,18 @@ export interface VideoRecoveryRequest {
   kind: "initial" | "port" | "decoder" | "reconnect";
 }
 
+export interface VideoHealthProbeRequest { requestId: number; sessionId: number; captureFrame: boolean; }
+export interface VideoHealthProbeResponse { requestId: number; diagnostics: VideoDiagnostics; image?: ArrayBuffer; }
+export interface VideoHealthSample { diagnostics: VideoDiagnostics; comparison?: "same" | "different" | "unknown"; }
+
 export interface VideoDiagnostics {
   sessionId?: number;
   presentedFrames?: number;
+  decodedFrames?: number;
+  playbackTime?: number;
+  frameReady?: boolean;
+  frameWidth?: number;
+  frameHeight?: number;
   monitorPlayback?: boolean;
   stage: VideoStage;
   packets: number;
@@ -271,6 +281,8 @@ export interface HmRemoteApi {
   requestVideoPort(): void;
   onVideoRecovery(callback: (request: VideoRecoveryRequest) => void): () => void;
   videoRecoveryReady(sessionId: number): void;
+  onVideoHealthProbe(callback: (request: VideoHealthProbeRequest) => void): () => void;
+  reportVideoHealthSample(sample: VideoHealthProbeResponse): void;
   reportVideoDiagnostics(diagnostics: VideoDiagnostics): void;
   pasteClipboard(): Promise<void>;
   captureScreenPlaceholder(serial: string): Promise<ScreenPlaceholder>;

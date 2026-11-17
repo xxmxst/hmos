@@ -20,8 +20,9 @@ import {
 } from "./protocol";
 import { CaptureRecoveryGate, friendlyCaptureError } from "./captureRecovery";
 import type { RuntimePaths } from "./paths";
-const FIRST_FRAME_TIMEOUT_MESSAGE = "\u624b\u673a\u6295\u5c4f\u670d\u52a1\u5df2\u5c31\u7eea\uff0c\u4f46\u89e6\u53d1\u753b\u9762\u53d8\u5316\u540e 12 \u79d2\u4ecd\u672a\u6536\u5230\u89c6\u9891\u6570\u636e\u3002\u8bf7\u4fdd\u6301\u624b\u673a\u4eae\u5c4f\uff0c\u505c\u6b62\u540e\u91cd\u8bd5";
-const FIRST_FRAME_WAITING_MESSAGE = "\u89c6\u9891\u670d\u52a1\u5df2\u5c31\u7eea\uff0c\u6b63\u5728\u6fc0\u6d3b\u624b\u673a\u753b\u9762\u5e76\u7b49\u5f85\u9996\u5e27\u2026";
+const READY_TIMEOUT_MESSAGE = "手机端投屏服务未报告就绪，请检查 USB 连接后重试";
+const FIRST_FRAME_WAITING_MESSAGE = "手机端视频服务已就绪，正在等待实时画面…";
+const FIRST_FRAME_SLOW_MESSAGE = "仍在等待实时画面，请保持手机亮屏并滑动一下";
 
 
 interface PendingRequest {
@@ -47,10 +48,14 @@ export class MirrorBridge extends EventEmitter {
   private firstVideoPacketSeen = false;
   private readonly captureRecovery = new CaptureRecoveryGate((timeout) => {
     if (timeout.kind === "first-frame") {
-      void this.failVideo(timeout.message);
+      if (!this.firstVideoPacketSeen && this.currentStatus.state === "waiting-video") {
+        this.setStatus("waiting-video", timeout.message);
+      }
       return;
     }
-    void this.failVideo("手机端投屏服务兼容模式启动超时，请停止投屏后重新连接");
+    const message = timeout.kind === "ready" ? timeout.message
+      : "手机端投屏服务兼容模式启动超时，请停止投屏后重新连接";
+    void this.failVideo(message);
   });
 
   constructor(private readonly paths: RuntimePaths) {
@@ -84,8 +89,12 @@ export class MirrorBridge extends EventEmitter {
     };
     this.emit("status", this.currentStatus);
     this.spawnBridge();
+    const child = this.child;
     try {
       await this.request("start", this.startPayload(options.serial, profile), 20_000);
+      if (this.child === child && !this.firstVideoPacketSeen && this.currentStatus.state === "connecting") {
+        this.captureRecovery.awaitReady(READY_TIMEOUT_MESSAGE);
+      }
     } catch (error) {
       this.captureRecovery.recovered();
       this.setStatus("error", error instanceof Error ? error.message : String(error));
@@ -160,12 +169,16 @@ export class MirrorBridge extends EventEmitter {
     }
     let state = this.currentStatus.state;
     let message = this.currentStatus.message;
-    if (video.stage === "decoding" || video.stage === "switching") {
+    if (video.stage === "decoding" || video.stage === "switching" || video.stage === "recovering") {
+      this.firstVideoPacketSeen = true;
+      this.captureRecovery.recovered();
       state = "streaming";
-      message = video.stage === "switching" ? "正在适配折叠屏画面…" : "投屏中";
+      message = videoStageMessage(video);
     } else if (state !== "connecting" && state !== "reconnecting" && state !== "error") {
       state = "waiting-video";
-      message = videoStageMessage(video);
+      if (video.packets > 0 || (message !== FIRST_FRAME_WAITING_MESSAGE && message !== FIRST_FRAME_SLOW_MESSAGE)) {
+        message = videoStageMessage(video);
+      }
     }
     this.currentStatus = { ...this.currentStatus, state, message, video };
     this.emit("status", this.currentStatus);
@@ -234,6 +247,7 @@ export class MirrorBridge extends EventEmitter {
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (text: string) => this.emit("log", redactLog(text)));
     parser.on("frame", (frame) => {
+      if (this.child !== child) return;
       if (frame.type === BridgeMessageType.Video) {
         if (
           !this.currentSerial
@@ -262,6 +276,7 @@ export class MirrorBridge extends EventEmitter {
     });
     parser.on("error", (error) => this.emit("log", String(error)));
     child.on("error", (error) => {
+      if (this.child !== child) return;
       this.captureRecovery.recovered();
       this.failPending(error);
       this.setStatus("error", `边车启动失败：${error.message}`);
@@ -314,18 +329,17 @@ export class MirrorBridge extends EventEmitter {
       const width = numberValue(message.width);
       const height = numberValue(message.height);
       const screen: DeviceScreen = { width, height, rotation: 0 };
-      const firstFrameReady = this.currentStatus.video?.stage === "decoding";
+      if (this.currentStatus.state === "streaming") {
+        this.setStatus("streaming", this.currentStatus.message, screen);
+        return;
+      }
       if (!this.firstVideoPacketSeen) {
-        this.captureRecovery.awaitFirstFrame(FIRST_FRAME_TIMEOUT_MESSAGE);
+        this.captureRecovery.awaitFirstFrame(FIRST_FRAME_SLOW_MESSAGE);
       }
-        this.setStatus(
-        firstFrameReady ? "streaming" : "waiting-video",
-        firstFrameReady ? "投屏中" : "视频通道已连接，正在等待首帧…",
-        screen
-      );
-      if (!firstFrameReady) {
-        this.setStatus("waiting-video", FIRST_FRAME_WAITING_MESSAGE, screen);
-      }
+      const waitingMessage = this.currentStatus.message === FIRST_FRAME_SLOW_MESSAGE ? FIRST_FRAME_SLOW_MESSAGE
+        : this.firstVideoPacketSeen && this.currentStatus.video?.packets ? videoStageMessage(this.currentStatus.video)
+        : FIRST_FRAME_WAITING_MESSAGE;
+      this.setStatus("waiting-video", waitingMessage, screen);
       void this.requestIdr().catch((error) => {
         this.emit("log", `Failed to request initial keyframe: ${String(error)}`);
       });
@@ -477,6 +491,8 @@ function videoStageMessage(video: VideoDiagnostics): string {
       return "投屏中";
     case "switching":
       return "正在适配折叠屏画面…";
+    case "recovering":
+      return "正在刷新视频画面…";
     case "error":
       return video.error ?? "视频解码失败";
   }

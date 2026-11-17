@@ -38,11 +38,11 @@ export class AdbClient {
     }
   }
 
-  async capturePng(serial: string): Promise<Buffer> {
+  async capturePng(serial: string, timeout = 20_000): Promise<Buffer> {
     validateAdbSerial(serial);
     try {
       const result = await execFileAsync(this.executable, ["-s", serial, "exec-out", "screencap", "-p"], {
-        windowsHide: true, timeout: 20_000, maxBuffer: 25 * 1024 * 1024, encoding: "buffer"
+        windowsHide: true, timeout, maxBuffer: 25 * 1024 * 1024, encoding: "buffer"
       });
       return extractAdbPng(result.stdout);
     } catch (error) {
